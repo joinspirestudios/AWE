@@ -1,5 +1,6 @@
 export * from './types'
 export * from './router'
+export * from './pricing'
 export { ClaudeProvider } from './providers/claude'
 export { GeminiProvider } from './providers/gemini'
 export { OpenAIProvider } from './providers/openai'

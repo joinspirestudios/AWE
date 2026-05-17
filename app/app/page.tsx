@@ -6,9 +6,14 @@ export default function Home() {
         <p className="mt-6 text-lg text-neutral-600">
           AI-powered carousel generator. Scaffold only — no editor yet.
         </p>
-        <p className="mt-4 text-sm text-neutral-400">
-          Next: build the editor against the locked scene model.
-        </p>
+        <div className="mt-8">
+          <a
+            href="/test/analyze-script"
+            className="inline-block rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+          >
+            Test: analyzeScript →
+          </a>
+        </div>
       </div>
     </main>
   )

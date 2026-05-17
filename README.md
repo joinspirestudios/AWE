@@ -15,7 +15,7 @@ AI-powered carousel generator.
 - **Language**: TypeScript strict everywhere
 - **Lint/format**: Biome
 
-## Repository layout
+## Repository layout.
 
 ```
 create-app/

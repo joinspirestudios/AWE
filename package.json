@@ -5,7 +5,7 @@
   "description": "AI-powered carousel generator",
   "scripts": {
     "dev": "pnpm --filter app dev",
-    "build": "pnpm --recursive build",
+    "build": "pnpm --filter app build",
     "typecheck": "pnpm --recursive typecheck",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",

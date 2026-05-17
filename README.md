@@ -61,11 +61,23 @@ Copy `app/.env.example` to `app/.env.local` and fill in:
 | Command | What |
 |---|---|
 | `pnpm dev` | Run the app (port 3000) |
-| `pnpm build` | Build everything |
+| `pnpm build` | Build the Next.js app for production |
 | `pnpm typecheck` | Typecheck all packages |
 | `pnpm lint` | Biome check |
 | `pnpm lint:fix` | Biome check + autofix |
 | `pnpm format` | Format with Biome |
+
+## Deploying to Vercel
+
+`vercel.json` at the root tells Vercel everything it needs:
+- Install via `pnpm install` (works with or without committed lockfile)
+- Build only the `app` package via `pnpm --filter app build`
+- Output goes to `app/.next`
+- Framework preset: Next.js
+
+You don't need to set a Root Directory in the Vercel dashboard — leave it at the
+repo root. For best results, commit `pnpm-lock.yaml` after your first local
+`pnpm install` so Vercel reproduces the exact dependency tree.
 
 ## Workspace packages
 

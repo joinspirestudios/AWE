@@ -83,7 +83,7 @@ repo root. For best results, commit `pnpm-lock.yaml` after your first local
 
 Anything imported as `@app/scene`, `@app/ai`, `@app/editor`, or `@app/shared` is
 a local workspace package. They're resolved by pnpm and consumed directly from
-their `src/` folders — no build step required during development.
+their `src/` folders no build step required during development.
 
 ## License
 

@@ -5,16 +5,15 @@
  *
  * Unified validation surface for the AI pipeline.
  *
- * Two tabs feed one analysis:
- *   - Script — paste your copy
- *   - References — fetch one or more reference carousels by URL
+ * Single-column input flow: paste a script, fetch one or more reference
+ * carousels, hit Analyze. Both inputs are visible at once so the mental
+ * model is "this is my carousel brief," not two separate workflows.
  *
  * The target slide count is derived from the fetched references
- * automatically (median of their slide counts), with a manual override.
- * Hitting Analyze runs analyzeScript with that count baked in.
+ * (median of their slide counts), with a manual override.
  *
- * When Gemini's analyzeReference ships, it slots in here: the references
- * already collected drive the visual style analysis without any new UI.
+ * When Gemini's analyzeReference ships, it slots into the references
+ * section — same data, new analysis pass alongside the script result.
  */
 
 import { useMemo, useState } from 'react'
@@ -132,16 +131,11 @@ function purposeStyle(purpose: string): string {
 // Page
 // ────────────────────────────────────────────────────────────────────────
 
-type TabKey = 'script' | 'references'
-
 export default function TestFunnelPage() {
-  // Tab state
-  const [activeTab, setActiveTab] = useState<TabKey>('script')
-
-  // Script tab state
+  // Script state
   const [script, setScript] = useState('')
 
-  // References tab state
+  // References state
   const [references, setReferences] = useState<Reference[]>([])
   const [referenceUrl, setReferenceUrl] = useState('')
   const [fetchingRef, setFetchingRef] = useState(false)
@@ -225,7 +219,6 @@ export default function TestFunnelPage() {
   async function analyze() {
     if (!script.trim()) {
       setAnalysisError('Script is required.')
-      setActiveTab('script')
       return
     }
     setAnalyzing(true)
@@ -274,45 +267,102 @@ export default function TestFunnelPage() {
 
         <div className="grid gap-6 lg:grid-cols-[1fr_1.2fr]">
           {/* ───────────────── INPUT COLUMN ───────────────── */}
-          <section className="space-y-4">
-            {/* Tab switcher */}
-            <div className="flex gap-1 border-b border-neutral-800">
-              <TabButton
-                active={activeTab === 'script'}
-                onClick={() => setActiveTab('script')}
+          <section className="space-y-6">
+            {/* ─── Script section ─── */}
+            <div className="space-y-3">
+              <SectionHeader
                 label="Script"
-                badge={script.length > 0 ? `${script.length}` : null}
+                badge={
+                  script.length > 0
+                    ? `${script.length.toLocaleString()} chars`
+                    : null
+                }
               />
-              <TabButton
-                active={activeTab === 'references'}
-                onClick={() => setActiveTab('references')}
+
+              <div className="flex flex-wrap gap-2">
+                {EXAMPLES.map((ex) => (
+                  <button
+                    type="button"
+                    key={ex.label}
+                    onClick={() => setScript(ex.script)}
+                    className="rounded-md border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-300 transition hover:bg-neutral-800"
+                  >
+                    {ex.label}
+                    <span className="ml-2 text-neutral-500">
+                      {ex.description}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              <textarea
+                value={script}
+                onChange={(e) => setScript(e.target.value)}
+                placeholder="Paste your script here..."
+                className="h-64 w-full resize-y rounded-lg border border-neutral-800 bg-neutral-900 p-4 font-mono text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+              />
+            </div>
+
+            {/* ─── References section ─── */}
+            <div className="space-y-3">
+              <SectionHeader
                 label="References"
                 badge={references.length > 0 ? `${references.length}` : null}
               />
-            </div>
 
-            {/* Tab content */}
-            <div className="min-h-[26rem]">
-              {activeTab === 'script' ? (
-                <ScriptTab
-                  script={script}
-                  setScript={setScript}
-                  examples={EXAMPLES}
+              <div className="flex gap-2">
+                <input
+                  type="url"
+                  value={referenceUrl}
+                  onChange={(e) => setReferenceUrl(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (
+                      e.key === 'Enter' &&
+                      !fetchingRef &&
+                      referenceUrl.trim()
+                    ) {
+                      fetchReference()
+                    }
+                  }}
+                  placeholder="https://www.instagram.com/p/..."
+                  className="flex-1 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
                 />
-              ) : (
-                <ReferencesTab
-                  url={referenceUrl}
-                  setUrl={setReferenceUrl}
-                  fetching={fetchingRef}
-                  error={refError}
-                  references={references}
-                  onFetch={fetchReference}
-                  onRemove={removeReference}
-                />
+                <button
+                  type="button"
+                  onClick={fetchReference}
+                  disabled={fetchingRef || !referenceUrl.trim()}
+                  className="rounded-md border border-neutral-700 bg-neutral-800 px-4 py-2 text-sm text-neutral-100 transition hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {fetchingRef ? 'Fetching…' : 'Add'}
+                </button>
+              </div>
+
+              {refError && (
+                <div className="rounded-lg border border-red-900 bg-red-950/50 p-3 text-sm text-red-200">
+                  {refError}
+                </div>
+              )}
+
+              {references.length === 0 && !fetchingRef && (
+                <div className="rounded-lg border border-dashed border-neutral-800 p-6 text-center text-sm text-neutral-500">
+                  No references yet. Paste an Instagram post URL to add one.
+                </div>
+              )}
+
+              {references.length > 0 && (
+                <div className="space-y-2">
+                  {references.map((ref) => (
+                    <ReferenceCard
+                      key={ref.id}
+                      reference={ref}
+                      onRemove={removeReference}
+                    />
+                  ))}
+                </div>
               )}
             </div>
 
-            {/* Slide count control + analyze (always visible) */}
+            {/* ─── Slide count control ─── */}
             <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
               <div className="flex items-center justify-between">
                 <div className="text-sm">
@@ -345,7 +395,7 @@ export default function TestFunnelPage() {
               )}
               {autoSlideCount === null && !manualSlideCount.trim() && (
                 <p className="mt-2 text-xs text-neutral-500">
-                  No references fetched. The model will infer slide count from
+                  No references yet. The model will infer slide count from
                   script density.
                 </p>
               )}
@@ -356,6 +406,7 @@ export default function TestFunnelPage() {
               )}
             </div>
 
+            {/* ─── Analyze button ─── */}
             <button
               type="button"
               onClick={analyze}
@@ -386,137 +437,23 @@ export default function TestFunnelPage() {
 // Subcomponents
 // ────────────────────────────────────────────────────────────────────────
 
-function TabButton({
-  active,
-  onClick,
+function SectionHeader({
   label,
   badge,
 }: {
-  active: boolean
-  onClick: () => void
   label: string
   badge: string | null
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`relative -mb-px flex items-center gap-2 border-b-2 px-4 py-2 text-sm transition ${
-        active
-          ? 'border-white text-neutral-100'
-          : 'border-transparent text-neutral-500 hover:text-neutral-300'
-      }`}
-    >
-      {label}
+    <div className="flex items-center gap-2">
+      <h2 className="text-xs font-semibold uppercase tracking-wider text-neutral-400">
+        {label}
+      </h2>
       {badge && (
-        <span
-          className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-            active
-              ? 'bg-white text-neutral-900'
-              : 'bg-neutral-800 text-neutral-400'
-          }`}
-        >
+        <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-[10px] font-medium text-neutral-400">
           {badge}
         </span>
       )}
-    </button>
-  )
-}
-
-function ScriptTab({
-  script,
-  setScript,
-  examples,
-}: {
-  script: string
-  setScript: (v: string) => void
-  examples: typeof EXAMPLES
-}) {
-  return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap gap-2">
-        {examples.map((ex) => (
-          <button
-            type="button"
-            key={ex.label}
-            onClick={() => setScript(ex.script)}
-            className="rounded-md border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-300 transition hover:bg-neutral-800"
-          >
-            {ex.label}
-            <span className="ml-2 text-neutral-500">{ex.description}</span>
-          </button>
-        ))}
-      </div>
-      <textarea
-        value={script}
-        onChange={(e) => setScript(e.target.value)}
-        placeholder="Paste your script here..."
-        className="h-80 w-full resize-y rounded-lg border border-neutral-800 bg-neutral-900 p-4 font-mono text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
-      />
-      <p className="text-xs text-neutral-500">
-        Characters: {script.length.toLocaleString()}
-      </p>
-    </div>
-  )
-}
-
-function ReferencesTab({
-  url,
-  setUrl,
-  fetching,
-  error,
-  references,
-  onFetch,
-  onRemove,
-}: {
-  url: string
-  setUrl: (v: string) => void
-  fetching: boolean
-  error: string | null
-  references: Reference[]
-  onFetch: () => void
-  onRemove: (id: string) => void
-}) {
-  return (
-    <div className="space-y-3">
-      <div className="flex gap-2">
-        <input
-          type="url"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !fetching && url.trim()) onFetch()
-          }}
-          placeholder="https://www.instagram.com/p/..."
-          className="flex-1 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
-        />
-        <button
-          type="button"
-          onClick={onFetch}
-          disabled={fetching || !url.trim()}
-          className="rounded-md border border-neutral-700 bg-neutral-800 px-4 py-2 text-sm text-neutral-100 transition hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {fetching ? 'Fetching…' : 'Add'}
-        </button>
-      </div>
-
-      {error && (
-        <div className="rounded-lg border border-red-900 bg-red-950/50 p-3 text-sm text-red-200">
-          {error}
-        </div>
-      )}
-
-      {references.length === 0 && !fetching && (
-        <div className="rounded-lg border border-dashed border-neutral-800 p-8 text-center text-sm text-neutral-500">
-          No references yet. Paste an Instagram post URL above to start.
-        </div>
-      )}
-
-      <div className="space-y-3">
-        {references.map((ref) => (
-          <ReferenceCard key={ref.id} reference={ref} onRemove={onRemove} />
-        ))}
-      </div>
     </div>
   )
 }

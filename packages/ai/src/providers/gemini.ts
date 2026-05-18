@@ -115,8 +115,9 @@ export class GeminiProvider implements AIProvider {
             allowedFunctionNames: [ANALYZE_REFERENCE_TOOL.name ?? ''],
           },
         },
-        // Tagged so we can filter Google AI Studio logs by prompt version.
-        labels: { prompt_version: ANALYZE_REFERENCE_VERSION },
+        // NOTE: do not pass `labels` here — that's a Vertex AI field and
+        // the Gemini Developer API rejects it at request time. We tag the
+        // prompt version in the system prompt itself instead.
       },
     })
 

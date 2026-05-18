@@ -103,13 +103,35 @@ export class ClaudeProvider implements AIProvider {
       )
     }
 
+    // Defensive normalization: Claude sometimes returns array fields as
+    // JSON-encoded strings when their content contains many escaped quotes
+    // (e.g. headlines like `"boring life"`). We try to recover by parsing
+    // such strings before validating. If the parse fails, Zod handles the
+    // error downstream.
+    const rawInput = toolUse.input as Record<string, unknown>
+    const normalizedInput: Record<string, unknown> = { ...rawInput }
+    for (const key of ['slides'] as const) {
+      const value = normalizedInput[key]
+      if (typeof value === 'string') {
+        try {
+          const reparsed = JSON.parse(value)
+          if (Array.isArray(reparsed)) {
+            normalizedInput[key] = reparsed
+          }
+        } catch {
+          // leave as-is; Zod will produce a clear error
+        }
+      }
+    }
+
     // Validate against our Zod schema. If Claude's output drifts from the
     // schema (rare, but possible), log the raw input + Zod issues so we
     // can diagnose without redeploying, then throw.
-    const parsed = ScriptAnalysisSchema.safeParse(toolUse.input)
+    const parsed = ScriptAnalysisSchema.safeParse(normalizedInput)
     if (!parsed.success) {
       console.error('[analyzeScript] validation failed', {
         rawToolInput: JSON.stringify(toolUse.input),
+        normalizedKeys: Object.keys(normalizedInput),
         zodIssues: parsed.error.issues,
         stopReason: response.stop_reason,
       })

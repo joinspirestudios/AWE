@@ -15,7 +15,7 @@
 
 import type { Tool } from '@anthropic-ai/sdk/resources/messages'
 
-export const ANALYZE_SCRIPT_VERSION = 'v1.0.1'
+export const ANALYZE_SCRIPT_VERSION = 'v1.0.2'
 
 export const ANALYZE_SCRIPT_SYSTEM_PROMPT = `You are a senior carousel content strategist. You analyze scripts that creators want turned into multi-slide social-media carousels for Instagram, LinkedIn, or TikTok photo mode.
 
@@ -78,7 +78,14 @@ For each slide:
 
 ## Output
 
-Call the submit_script_analysis tool with your structured result. Do not include any text outside the tool call.`
+Call the submit_script_analysis tool with your structured result. Do not include any text outside the tool call.
+
+## JSON formatting rules — critical
+
+- The slides field MUST be a JSON array, never a string. Do not wrap the array in quotes.
+- The emphasis field on each slide MUST be a JSON array of strings, never a string itself.
+- When a headline or body string contains quotation marks (e.g. a phrase like a "boring life"), escape the inner quote characters with a backslash: \\"boring life\\". Never wrap the whole array in quotes to avoid escaping.
+- Apostrophes ('like this') do not need escaping.`
 
 /**
  * The Anthropic tool definition. The input_schema is JSON Schema; it

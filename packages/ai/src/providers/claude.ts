@@ -65,7 +65,10 @@ export class ClaudeProvider implements AIProvider {
     const response = await this.client.messages.create(
       {
         model: this.model,
-        max_tokens: 4096,
+        // 16K covers even 20-slide carousels with detailed bodies. Sonnet
+        // 4.6 supports up to 64K output tokens; we cap here to prevent
+        // pathologically long responses without truncating real ones.
+        max_tokens: 16_384,
         system: ANALYZE_SCRIPT_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: userMessage }],
         tools: [ANALYZE_SCRIPT_TOOL],
@@ -79,6 +82,14 @@ export class ClaudeProvider implements AIProvider {
       { signal },
     )
 
+    // If the response got truncated mid-tool-call, surface a clean error
+    // instead of letting Zod fail on partial JSON downstream.
+    if (response.stop_reason === 'max_tokens') {
+      throw new Error(
+        'ClaudeProvider.analyzeScript: response was truncated (hit max_tokens). The script may be unusually long or dense — try splitting it.',
+      )
+    }
+
     // Find the tool_use content block. With tool_choice forcing the tool,
     // there should be exactly one.
     const toolUse = response.content.find(
@@ -88,16 +99,24 @@ export class ClaudeProvider implements AIProvider {
 
     if (!toolUse) {
       throw new Error(
-        'ClaudeProvider.analyzeScript: model did not return a tool_use block',
+        `ClaudeProvider.analyzeScript: model did not return a tool_use block (stop_reason=${response.stop_reason})`,
       )
     }
 
     // Validate against our Zod schema. If Claude's output drifts from the
-    // schema (rare, but possible), Zod tells us exactly what's wrong.
+    // schema (rare, but possible), log the raw input + Zod issues so we
+    // can diagnose without redeploying, then throw.
     const parsed = ScriptAnalysisSchema.safeParse(toolUse.input)
     if (!parsed.success) {
+      console.error('[analyzeScript] validation failed', {
+        rawToolInput: JSON.stringify(toolUse.input),
+        zodIssues: parsed.error.issues,
+        stopReason: response.stop_reason,
+      })
       throw new Error(
-        `ClaudeProvider.analyzeScript: tool output failed validation: ${parsed.error.message}`,
+        `ClaudeProvider.analyzeScript: tool output failed validation. ${parsed.error.issues.length} issue(s): ${parsed.error.issues
+          .map((i) => `${i.path.join('.')}: ${i.message}`)
+          .join('; ')}`,
       )
     }
 

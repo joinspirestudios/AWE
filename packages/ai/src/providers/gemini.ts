@@ -29,8 +29,15 @@ import type {
   ProviderName,
 } from '../types'
 
-/** Default model. 2.5 Pro is strongest at structured visual reasoning. */
-const DEFAULT_MODEL = 'gemini-2.5-pro'
+/**
+ * Default model. Flash is in the free tier and is plenty capable for
+ * structured visual extraction (color sampling, font category ID, layout
+ * description). Pro was removed from the free tier on April 1, 2026 and
+ * is only worth paying for if we need its deeper reasoning — not
+ * something this task needs. Override via `defaultModel` in the
+ * constructor when we move to paid tier.
+ */
+const DEFAULT_MODEL = 'gemini-2.5-flash'
 
 /**
  * Max images we'll inline-encode in one request. Gemini supports many more,

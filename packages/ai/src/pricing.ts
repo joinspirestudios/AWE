@@ -35,16 +35,20 @@ export function estimateClaudeCost(
   model: string,
   inputTokens: number,
   outputTokens: number,
-  cachedInputTokens = 0,
+  cacheReadTokens = 0,
+  cacheCreationTokens = 0,
 ): number {
   const p = CLAUDE_PRICING[model]
   if (!p) return 0
-  const regularInput = Math.max(0, inputTokens - cachedInputTokens)
-  const inputCost =
-    (regularInput * p.inputPerMillion + cachedInputTokens * p.inputPerMillion * 0.1) /
-    1_000_000
+  // Anthropic reports these as separate fields. inputTokens excludes both
+  // cache reads and cache writes — they're tracked independently.
+  const inputCost = (inputTokens * p.inputPerMillion) / 1_000_000
+  const cacheWriteCost =
+    (cacheCreationTokens * p.inputPerMillion * 1.25) / 1_000_000
+  const cacheReadCost =
+    (cacheReadTokens * p.inputPerMillion * 0.1) / 1_000_000
   const outputCost = (outputTokens * p.outputPerMillion) / 1_000_000
-  return inputCost + outputCost
+  return inputCost + cacheWriteCost + cacheReadCost + outputCost
 }
 
 export function estimateGeminiCost(

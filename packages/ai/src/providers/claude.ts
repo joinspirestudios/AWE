@@ -69,7 +69,18 @@ export class ClaudeProvider implements AIProvider {
         // 4.6 supports up to 64K output tokens; we cap here to prevent
         // pathologically long responses without truncating real ones.
         max_tokens: 16_384,
-        system: ANALYZE_SCRIPT_SYSTEM_PROMPT,
+        // System prompt is identical across every analyzeScript call, so
+        // we mark it for ephemeral caching (5-minute TTL). First call
+        // within the window writes the cache (~25% premium on those
+        // input tokens); subsequent calls read at 90% off normal input
+        // rate. Net win for any active session.
+        system: [
+          {
+            type: 'text',
+            text: ANALYZE_SCRIPT_SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
         messages: [{ role: 'user', content: userMessage }],
         tools: [ANALYZE_SCRIPT_TOOL],
         // Force Claude to call our tool — no free-text replies possible.
@@ -145,7 +156,8 @@ export class ClaudeProvider implements AIProvider {
     const durationMs = Date.now() - start
     const inputTokens = response.usage.input_tokens
     const outputTokens = response.usage.output_tokens
-    const cachedInputTokens = response.usage.cache_read_input_tokens ?? 0
+    const cacheReadTokens = response.usage.cache_read_input_tokens ?? 0
+    const cacheCreationTokens = response.usage.cache_creation_input_tokens ?? 0
 
     return {
       data: parsed.data,
@@ -155,12 +167,13 @@ export class ClaudeProvider implements AIProvider {
         durationMs,
         inputTokens,
         outputTokens,
-        cachedInputTokens,
+        cachedInputTokens: cacheReadTokens,
         estimatedCostUsd: estimateClaudeCost(
           this.model,
           inputTokens,
           outputTokens,
-          cachedInputTokens,
+          cacheReadTokens,
+          cacheCreationTokens,
         ),
       },
     }

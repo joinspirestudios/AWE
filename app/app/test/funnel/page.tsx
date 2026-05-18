@@ -5,15 +5,20 @@
  *
  * Unified validation surface for the AI pipeline.
  *
- * Single-column input flow: paste a script, fetch one or more reference
- * carousels, hit Analyze. Both inputs are visible at once so the mental
- * model is "this is my carousel brief," not two separate workflows.
+ * Inputs (stacked):
+ *   - Script — paste your copy
+ *   - References — fetch one or more reference carousels by URL
  *
- * The target slide count is derived from the fetched references
- * (median of their slide counts), with a manual override.
+ * Hitting Analyze runs both analyzeScript (Claude) and, when references
+ * are present, analyzeReference (Gemini) in parallel. Results appear in
+ * the right column:
+ *   - StyleSpec card (read-only) — from Gemini
+ *   - Carousel-level fields (editable) — from Claude
+ *   - Slide cards (editable, deletable) — from Claude
  *
- * When Gemini's analyzeReference ships, it slots into the references
- * section — same data, new analysis pass alongside the script result.
+ * Edit semantics: every text field on slides and carousel-level fields
+ * is an inline-editable input. Changes update local state immediately.
+ * Re-running Analyze overwrites edits with a fresh response.
  */
 
 import { useMemo, useState } from 'react'
@@ -60,6 +65,41 @@ interface UsageOutput {
 
 interface AnalysisResponse {
   analysis: AnalysisOutput
+  usage: UsageOutput
+}
+
+interface FontGuess {
+  family: string
+  weight: number
+  style: 'normal' | 'italic'
+  confidence: number
+}
+
+interface StyleSpec {
+  colors: { primary: string[]; accents: string[] }
+  typography: {
+    headlineStyle: 'serif' | 'sans' | 'display' | 'monospace'
+    headlineWeight: 'light' | 'regular' | 'medium' | 'bold' | 'black'
+    bodyStyle: 'serif' | 'sans'
+    hierarchy: 'high-contrast' | 'subtle'
+    headlineFontGuesses: FontGuess[]
+    bodyFontGuesses: FontGuess[]
+  }
+  layout: {
+    alignment: 'left' | 'center' | 'right' | 'mixed'
+    grid: 'tight' | 'loose' | 'asymmetric'
+    fullBleed: boolean
+  }
+  background: {
+    type: 'solid' | 'gradient' | 'photo' | 'photo-overlay' | 'texture'
+    mood: 'dark' | 'light' | 'high-contrast'
+  }
+  motifs: string[]
+  slidePattern: 'consistent' | 'varied' | 'progressive'
+}
+
+interface StyleResponse {
+  styleSpec: StyleSpec
   usage: UsageOutput
 }
 
@@ -110,6 +150,16 @@ oh and add stat about how 70% of skincare users use wrong order (saw on reddit l
   },
 ]
 
+const CANONICAL_PURPOSES = [
+  'hook',
+  'point',
+  'data',
+  'quote',
+  'comparison',
+  'step',
+  'cta',
+]
+
 const PURPOSE_COLORS: Record<string, string> = {
   hook: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
   point: 'bg-neutral-500/15 text-neutral-300 border-neutral-500/30',
@@ -126,6 +176,10 @@ function purposeStyle(purpose: string): string {
     'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30'
   )
 }
+
+// Shared input class for inline editing: minimal chrome, hover/focus reveal.
+const INLINE_INPUT =
+  '-mx-2 -my-1 rounded px-2 py-1 bg-transparent transition hover:bg-neutral-800/40 focus:bg-neutral-800/60 focus:outline-none border-0 w-full'
 
 // ────────────────────────────────────────────────────────────────────────
 // Page
@@ -144,12 +198,18 @@ export default function TestFunnelPage() {
   // Slide count override (manual)
   const [manualSlideCount, setManualSlideCount] = useState('')
 
-  // Analysis state
+  // Analysis state (script)
   const [analyzing, setAnalyzing] = useState(false)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(
     null,
   )
+
+  // Analysis state (style / Gemini)
+  const [analyzingStyle, setAnalyzingStyle] = useState(false)
+  const [styleError, setStyleError] = useState<string | null>(null)
+  const [styleResult, setStyleResult] = useState<StyleResponse | null>(null)
+
   const [showRaw, setShowRaw] = useState(false)
 
   // ────────────────────────────────────────────────────────────────────────
@@ -179,7 +239,7 @@ export default function TestFunnelPage() {
   }, [manualSlideCount, autoSlideCount])
 
   // ────────────────────────────────────────────────────────────────────────
-  // Actions
+  // Actions: references
   // ────────────────────────────────────────────────────────────────────────
 
   async function fetchReference() {
@@ -216,36 +276,108 @@ export default function TestFunnelPage() {
     setReferences((prev) => prev.filter((r) => r.id !== id))
   }
 
+  // ────────────────────────────────────────────────────────────────────────
+  // Actions: analyze (runs script + style in parallel)
+  // ────────────────────────────────────────────────────────────────────────
+
   async function analyze() {
     if (!script.trim()) {
       setAnalysisError('Script is required.')
       return
     }
-    setAnalyzing(true)
+
+    // Clear previous results immediately so the UI doesn't show stale state.
     setAnalysisError(null)
+    setStyleError(null)
     setAnalysisResult(null)
-    try {
-      const body: Record<string, unknown> = { script }
-      if (effectiveSlideCount) {
-        body.referenceSlideCount = effectiveSlideCount
-      }
-      const res = await fetch('/api/analyze-script', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      const data = await res.json()
-      if (!res.ok) {
-        throw new Error(
-          data?.message ?? data?.error ?? `Request failed (${res.status})`,
-        )
-      }
-      setAnalysisResult(data as AnalysisResponse)
-    } catch (err) {
-      setAnalysisError(err instanceof Error ? err.message : 'Unknown error')
-    } finally {
-      setAnalyzing(false)
+    setStyleResult(null)
+    setAnalyzing(true)
+    if (references.length > 0) setAnalyzingStyle(true)
+
+    // Build the inputs for both passes
+    const scriptBody: Record<string, unknown> = { script }
+    if (effectiveSlideCount) scriptBody.referenceSlideCount = effectiveSlideCount
+
+    const styleBody = {
+      images: references.flatMap((r) =>
+        r.images.map((img) => ({
+          src: img.src,
+          order: img.order,
+          postId: r.id,
+        })),
+      ),
     }
+
+    // Run in parallel. We don't fail the whole analyze if style fails.
+    const [scriptResult, styleResult] = await Promise.allSettled([
+      callJson<AnalysisResponse>('/api/analyze-script', scriptBody),
+      references.length > 0
+        ? callJson<StyleResponse>('/api/analyze-reference', styleBody)
+        : Promise.resolve(null),
+    ])
+
+    if (scriptResult.status === 'fulfilled' && scriptResult.value) {
+      setAnalysisResult(scriptResult.value)
+    } else if (scriptResult.status === 'rejected') {
+      setAnalysisError(
+        scriptResult.reason instanceof Error
+          ? scriptResult.reason.message
+          : String(scriptResult.reason),
+      )
+    }
+
+    if (styleResult.status === 'fulfilled' && styleResult.value) {
+      setStyleResult(styleResult.value)
+    } else if (styleResult.status === 'rejected') {
+      setStyleError(
+        styleResult.reason instanceof Error
+          ? styleResult.reason.message
+          : String(styleResult.reason),
+      )
+    }
+
+    setAnalyzing(false)
+    setAnalyzingStyle(false)
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Actions: edit analysis result (slide + carousel-level)
+  // ────────────────────────────────────────────────────────────────────────
+
+  function updateCarouselMeta(updates: Partial<AnalysisOutput>) {
+    setAnalysisResult((prev) =>
+      prev ? { ...prev, analysis: { ...prev.analysis, ...updates } } : prev,
+    )
+  }
+
+  function updateSlide(index: number, updates: Partial<SlideOutput>) {
+    setAnalysisResult((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        analysis: {
+          ...prev.analysis,
+          slides: prev.analysis.slides.map((s, i) =>
+            i === index ? { ...s, ...updates } : s,
+          ),
+        },
+      }
+    })
+  }
+
+  function deleteSlide(index: number) {
+    setAnalysisResult((prev) => {
+      if (!prev) return prev
+      const newSlides = prev.analysis.slides.filter((_, i) => i !== index)
+      return {
+        ...prev,
+        analysis: {
+          ...prev.analysis,
+          slides: newSlides,
+          recommendedSlideCount: newSlides.length,
+        },
+      }
+    })
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -260,15 +392,15 @@ export default function TestFunnelPage() {
             Test: funnel
           </h1>
           <p className="mt-1 text-sm text-neutral-400">
-            Paste a script and fetch reference carousels. Analyzing uses the
-            references to set the target slide count automatically.
+            Paste a script and fetch reference carousels. Analyzing produces
+            an editable slide breakdown and a style spec.
           </p>
         </header>
 
         <div className="grid gap-6 lg:grid-cols-[1fr_1.2fr]">
           {/* ───────────────── INPUT COLUMN ───────────────── */}
           <section className="space-y-6">
-            {/* ─── Script section ─── */}
+            {/* Script section */}
             <div className="space-y-3">
               <SectionHeader
                 label="Script"
@@ -303,7 +435,7 @@ export default function TestFunnelPage() {
               />
             </div>
 
-            {/* ─── References section ─── */}
+            {/* References section */}
             <div className="space-y-3">
               <SectionHeader
                 label="References"
@@ -362,7 +494,7 @@ export default function TestFunnelPage() {
               )}
             </div>
 
-            {/* ─── Slide count control ─── */}
+            {/* Slide count control */}
             <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
               <div className="flex items-center justify-between">
                 <div className="text-sm">
@@ -406,26 +538,62 @@ export default function TestFunnelPage() {
               )}
             </div>
 
-            {/* ─── Analyze button ─── */}
             <button
               type="button"
               onClick={analyze}
-              disabled={analyzing || !script.trim()}
+              disabled={analyzing || analyzingStyle || !script.trim()}
               className="w-full rounded-md bg-white px-4 py-2.5 text-sm font-medium text-neutral-900 transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-400"
             >
-              {analyzing ? 'Analyzing…' : 'Analyze'}
+              {analyzing || analyzingStyle ? 'Analyzing…' : 'Analyze'}
             </button>
           </section>
 
           {/* ───────────────── RESULTS COLUMN ───────────────── */}
           <section className="min-h-[24rem] space-y-4">
-            <ResultsPanel
+            {/* Style spec result */}
+            {analyzingStyle && (
+              <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 text-sm text-neutral-400">
+                Gemini analyzing references…
+              </div>
+            )}
+            {styleError && (
+              <div className="rounded-lg border border-red-900/60 bg-red-950/40 p-4 text-sm text-red-200">
+                <strong>Style analysis failed:</strong> {styleError}
+              </div>
+            )}
+            {styleResult && <StyleSpecCard data={styleResult} />}
+
+            {/* Script analysis result */}
+            <AnalysisPanel
               loading={analyzing}
               error={analysisError}
               result={analysisResult}
-              showRaw={showRaw}
-              setShowRaw={setShowRaw}
+              onUpdateCarouselMeta={updateCarouselMeta}
+              onUpdateSlide={updateSlide}
+              onDeleteSlide={deleteSlide}
             />
+
+            {/* Raw JSON toggle */}
+            {(analysisResult || styleResult) && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowRaw((v) => !v)}
+                  className="text-xs text-neutral-500 underline hover:text-neutral-300"
+                >
+                  {showRaw ? 'Hide' : 'Show'} raw JSON
+                </button>
+                {showRaw && (
+                  <pre className="overflow-auto rounded-lg border border-neutral-800 bg-neutral-950 p-4 text-xs text-neutral-300">
+                    {JSON.stringify(
+                      { analysis: analysisResult, style: styleResult },
+                      null,
+                      2,
+                    )}
+                  </pre>
+                )}
+              </>
+            )}
           </section>
         </div>
       </div>
@@ -434,7 +602,26 @@ export default function TestFunnelPage() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Subcomponents
+// Helpers
+// ────────────────────────────────────────────────────────────────────────
+
+async function callJson<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(
+      data?.message ?? data?.error ?? `Request failed (${res.status})`,
+    )
+  }
+  return data as T
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Subcomponents — sections & cards
 // ────────────────────────────────────────────────────────────────────────
 
 function SectionHeader({
@@ -485,20 +672,7 @@ function ReferenceCard({
           aria-label="Remove reference"
           className="rounded p-1 text-neutral-500 transition hover:bg-neutral-800 hover:text-red-400"
         >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
+          <CloseIcon />
         </button>
       </div>
       <div className="grid grid-cols-4 gap-1">
@@ -522,23 +696,29 @@ function ReferenceCard({
   )
 }
 
-function ResultsPanel({
+// ────────────────────────────────────────────────────────────────────────
+// Subcomponent — AnalysisPanel (editable carousel meta + slides)
+// ────────────────────────────────────────────────────────────────────────
+
+function AnalysisPanel({
   loading,
   error,
   result,
-  showRaw,
-  setShowRaw,
+  onUpdateCarouselMeta,
+  onUpdateSlide,
+  onDeleteSlide,
 }: {
   loading: boolean
   error: string | null
   result: AnalysisResponse | null
-  showRaw: boolean
-  setShowRaw: (v: boolean | ((p: boolean) => boolean)) => void
+  onUpdateCarouselMeta: (updates: Partial<AnalysisOutput>) => void
+  onUpdateSlide: (index: number, updates: Partial<SlideOutput>) => void
+  onDeleteSlide: (index: number) => void
 }) {
   if (error) {
     return (
       <div className="rounded-lg border border-red-900 bg-red-950/50 p-4 text-sm text-red-200">
-        <strong>Error:</strong> {error}
+        <strong>Script analysis failed:</strong> {error}
       </div>
     )
   }
@@ -546,7 +726,7 @@ function ResultsPanel({
   if (loading) {
     return (
       <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-8 text-center text-sm text-neutral-400">
-        Calling Claude…
+        Claude analyzing script…
       </div>
     )
   }
@@ -554,61 +734,56 @@ function ResultsPanel({
   if (!result) {
     return (
       <div className="rounded-lg border border-dashed border-neutral-800 p-8 text-center text-sm text-neutral-500">
-        Results will appear here.
+        Script results will appear here.
       </div>
     )
   }
 
   return (
     <>
-      {/* Carousel-level */}
+      {/* Carousel-level (editable) */}
       <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
         <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-          <Field label="Niche" value={result.analysis.niche} />
-          <Field label="Sub-niche" value={result.analysis.subNiche ?? '—'} />
-          <Field label="Tone" value={result.analysis.tone} />
-          <Field label="Audience" value={result.analysis.audience} />
+          <EditableField
+            label="Niche"
+            value={result.analysis.niche}
+            onChange={(v) => onUpdateCarouselMeta({ niche: v })}
+          />
+          <EditableField
+            label="Sub-niche"
+            value={result.analysis.subNiche ?? ''}
+            placeholder="—"
+            onChange={(v) =>
+              onUpdateCarouselMeta({ subNiche: v.trim() ? v : undefined })
+            }
+          />
+          <EditableField
+            label="Tone"
+            value={result.analysis.tone}
+            onChange={(v) => onUpdateCarouselMeta({ tone: v })}
+          />
+          <EditableField
+            label="Audience"
+            value={result.analysis.audience}
+            onChange={(v) => onUpdateCarouselMeta({ audience: v })}
+          />
         </div>
         <div className="mt-3 border-t border-neutral-800 pt-3 text-sm text-neutral-400">
-          Recommended slides:{' '}
-          <span className="text-neutral-100">
-            {result.analysis.recommendedSlideCount}
-          </span>
+          {result.analysis.slides.length} slide
+          {result.analysis.slides.length === 1 ? '' : 's'}
         </div>
       </div>
 
-      {/* Slide cards */}
+      {/* Slides (editable + deletable) */}
       <div className="space-y-3">
         {result.analysis.slides.map((slide, i) => (
-          <article
+          <EditableSlideCard
             key={i}
-            className="rounded-lg border border-neutral-800 bg-neutral-900 p-4"
-          >
-            <div className="mb-2 flex items-center gap-3">
-              <span className="text-xs text-neutral-500">
-                {String(i + 1).padStart(2, '0')}
-              </span>
-              <span
-                className={`rounded-md border px-2 py-0.5 text-xs font-medium ${purposeStyle(slide.purpose)}`}
-              >
-                {slide.purpose}
-              </span>
-            </div>
-            <h3 className="text-lg font-medium leading-snug">
-              <HighlightedHeadline
-                text={slide.headline}
-                emphasis={slide.emphasis}
-              />
-            </h3>
-            {slide.body && (
-              <p className="mt-2 text-sm text-neutral-400">{slide.body}</p>
-            )}
-            {slide.emphasis.length > 0 && (
-              <div className="mt-2 text-xs text-neutral-500">
-                Emphasis: {slide.emphasis.join(' · ')}
-              </div>
-            )}
-          </article>
+            index={i}
+            slide={slide}
+            onChange={(updates) => onUpdateSlide(i, updates)}
+            onDelete={() => onDeleteSlide(i)}
+          />
         ))}
       </div>
 
@@ -635,64 +810,306 @@ function ResultsPanel({
           />
         </div>
       </div>
-
-      {/* Raw JSON */}
-      <button
-        type="button"
-        onClick={() => setShowRaw((v) => !v)}
-        className="text-xs text-neutral-500 underline hover:text-neutral-300"
-      >
-        {showRaw ? 'Hide' : 'Show'} raw JSON
-      </button>
-      {showRaw && (
-        <pre className="overflow-auto rounded-lg border border-neutral-800 bg-neutral-950 p-4 text-xs text-neutral-300">
-          {JSON.stringify(result, null, 2)}
-        </pre>
-      )}
     </>
   )
 }
 
-function HighlightedHeadline({
-  text,
-  emphasis,
+function EditableSlideCard({
+  index,
+  slide,
+  onChange,
+  onDelete,
 }: {
-  text: string
-  emphasis: string[]
+  index: number
+  slide: SlideOutput
+  onChange: (updates: Partial<SlideOutput>) => void
+  onDelete: () => void
 }) {
-  if (!emphasis.length) return <>{text}</>
-  const escaped = emphasis
-    .filter(Boolean)
-    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  if (!escaped.length) return <>{text}</>
-  const pattern = new RegExp(`(${escaped.join('|')})`, 'g')
-  const parts = text.split(pattern)
+  const [emphasisInput, setEmphasisInput] = useState('')
+
+  function addEmphasis() {
+    const v = emphasisInput.trim()
+    if (!v) return
+    if (slide.emphasis.includes(v)) {
+      setEmphasisInput('')
+      return
+    }
+    onChange({ emphasis: [...slide.emphasis, v] })
+    setEmphasisInput('')
+  }
+
+  function removeEmphasis(value: string) {
+    onChange({ emphasis: slide.emphasis.filter((e) => e !== value) })
+  }
+
+  return (
+    <article className="group rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+      {/* Header: index, purpose, delete */}
+      <div className="mb-3 flex items-center gap-3">
+        <span className="text-xs text-neutral-500">
+          {String(index + 1).padStart(2, '0')}
+        </span>
+        <PurposeInput
+          value={slide.purpose}
+          onChange={(v) => onChange({ purpose: v })}
+        />
+        <button
+          type="button"
+          onClick={onDelete}
+          aria-label="Delete slide"
+          className="ml-auto rounded p-1 text-neutral-600 opacity-0 transition group-hover:opacity-100 hover:bg-neutral-800 hover:text-red-400 focus:opacity-100"
+        >
+          <CloseIcon />
+        </button>
+      </div>
+
+      {/* Headline */}
+      <input
+        type="text"
+        value={slide.headline}
+        onChange={(e) => onChange({ headline: e.target.value })}
+        placeholder="Headline"
+        className={`${INLINE_INPUT} text-lg font-medium leading-snug`}
+      />
+
+      {/* Body */}
+      <textarea
+        value={slide.body ?? ''}
+        onChange={(e) =>
+          onChange({ body: e.target.value || undefined })
+        }
+        placeholder="Add body text…"
+        rows={2}
+        className={`${INLINE_INPUT} mt-2 resize-y text-sm text-neutral-400`}
+      />
+
+      {/* Emphasis */}
+      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        <span className="text-xs text-neutral-500">Emphasis:</span>
+        {slide.emphasis.map((value) => (
+          <span
+            key={value}
+            className="inline-flex items-center gap-1 rounded bg-amber-400/20 px-2 py-0.5 text-xs text-amber-200"
+          >
+            {value}
+            <button
+              type="button"
+              onClick={() => removeEmphasis(value)}
+              aria-label={`Remove emphasis ${value}`}
+              className="text-amber-200/60 hover:text-amber-100"
+            >
+              <CloseIcon size={10} />
+            </button>
+          </span>
+        ))}
+        <input
+          type="text"
+          value={emphasisInput}
+          onChange={(e) => setEmphasisInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              addEmphasis()
+            }
+          }}
+          onBlur={addEmphasis}
+          placeholder="+ add"
+          className="min-w-[80px] flex-1 rounded bg-transparent px-1 py-0.5 text-xs text-neutral-300 placeholder:text-neutral-600 focus:bg-neutral-800/60 focus:outline-none"
+        />
+      </div>
+    </article>
+  )
+}
+
+function PurposeInput({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (v: string) => void
+}) {
   return (
     <>
-      {parts.map((part, i) =>
-        emphasis.includes(part) ? (
-          <mark
-            key={i}
-            className="rounded bg-amber-400/30 px-1 text-amber-200"
-          >
-            {part}
-          </mark>
-        ) : (
-          <span key={i}>{part}</span>
-        ),
-      )}
+      <input
+        type="text"
+        list="purpose-options"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={`w-auto rounded-md border px-2 py-0.5 text-xs font-medium focus:outline-none ${purposeStyle(value)}`}
+        style={{ minWidth: `${Math.max(60, value.length * 8 + 24)}px` }}
+      />
+      <datalist id="purpose-options">
+        {CANONICAL_PURPOSES.map((p) => (
+          <option key={p} value={p} />
+        ))}
+      </datalist>
     </>
   )
 }
 
-function Field({ label, value }: { label: string; value: string }) {
+function EditableField({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+}) {
   return (
     <div>
       <div className="text-xs uppercase tracking-wider text-neutral-500">
         {label}
       </div>
-      <div className="mt-0.5 text-neutral-100">{value}</div>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className={`${INLINE_INPUT} mt-0.5 text-neutral-100 placeholder:text-neutral-600`}
+      />
     </div>
+  )
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Subcomponent — StyleSpecCard (read-only display from Gemini)
+// ────────────────────────────────────────────────────────────────────────
+
+function StyleSpecCard({ data }: { data: StyleResponse }) {
+  const { styleSpec, usage } = data
+
+  return (
+    <div className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+      <div className="flex items-center gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-300">
+          Style spec
+        </h3>
+        <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-[10px] text-neutral-400">
+          Gemini
+        </span>
+        <span className="ml-auto text-[10px] text-neutral-500">
+          {usage.durationMs} ms · ${usage.estimatedCostUsd?.toFixed(5) ?? '0'}
+        </span>
+      </div>
+
+      {/* Colors */}
+      <div>
+        <div className="text-[10px] uppercase tracking-wider text-neutral-500">
+          Colors
+        </div>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          {styleSpec.colors.primary.map((hex, i) => (
+            <ColorSwatch key={`p-${i}`} hex={hex} kind="primary" />
+          ))}
+          {styleSpec.colors.accents.map((hex, i) => (
+            <ColorSwatch key={`a-${i}`} hex={hex} kind="accent" />
+          ))}
+        </div>
+      </div>
+
+      {/* Typography */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-neutral-500">
+            Headline · {styleSpec.typography.headlineStyle} ·{' '}
+            {styleSpec.typography.headlineWeight}
+          </div>
+          <FontGuessList guesses={styleSpec.typography.headlineFontGuesses} />
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-neutral-500">
+            Body · {styleSpec.typography.bodyStyle}
+          </div>
+          <FontGuessList guesses={styleSpec.typography.bodyFontGuesses} />
+        </div>
+      </div>
+
+      {/* Layout & background */}
+      <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
+        <Stat label="Alignment" value={styleSpec.layout.alignment} />
+        <Stat label="Grid" value={styleSpec.layout.grid} />
+        <Stat
+          label="Background"
+          value={`${styleSpec.background.type} · ${styleSpec.background.mood}`}
+        />
+        <Stat label="Hierarchy" value={styleSpec.typography.hierarchy} />
+      </div>
+
+      {/* Motifs */}
+      {styleSpec.motifs.length > 0 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-neutral-500">
+            Motifs
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {styleSpec.motifs.map((m, i) => (
+              <span
+                key={i}
+                className="rounded bg-neutral-800 px-2 py-0.5 text-xs text-neutral-300"
+              >
+                {m}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="border-t border-neutral-800 pt-2 text-xs text-neutral-500">
+        Slide pattern:{' '}
+        <span className="text-neutral-300">{styleSpec.slidePattern}</span>
+        {styleSpec.layout.fullBleed && (
+          <span className="ml-3 text-neutral-300">full-bleed</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ColorSwatch({
+  hex,
+  kind,
+}: {
+  hex: string
+  kind: 'primary' | 'accent'
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <div
+        className="h-6 w-6 rounded border border-neutral-700"
+        style={{ backgroundColor: hex }}
+        aria-label={`${kind} color ${hex}`}
+      />
+      <span className="font-mono text-[10px] text-neutral-400">{hex}</span>
+    </div>
+  )
+}
+
+function FontGuessList({ guesses }: { guesses: FontGuess[] }) {
+  if (guesses.length === 0) {
+    return (
+      <div className="mt-0.5 text-xs text-neutral-500">
+        No specific match — using category fallback
+      </div>
+    )
+  }
+  return (
+    <ol className="mt-0.5 space-y-0.5">
+      {guesses.map((g, i) => (
+        <li key={i} className="flex items-center gap-2 text-xs">
+          <span className="text-neutral-200">{g.family}</span>
+          <span className="text-neutral-500">{g.weight}</span>
+          {g.style === 'italic' && (
+            <span className="text-neutral-500">italic</span>
+          )}
+          <span className="ml-auto text-[10px] text-neutral-600">
+            {Math.round(g.confidence * 100)}%
+          </span>
+        </li>
+      ))}
+    </ol>
   )
 }
 
@@ -704,5 +1121,24 @@ function Stat({ label, value }: { label: string; value: string }) {
       </div>
       <div className="text-neutral-100">{value}</div>
     </div>
+  )
+}
+
+function CloseIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
   )
 }

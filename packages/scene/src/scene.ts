@@ -406,6 +406,103 @@ export const StyleSpecSchema = z.object({
 })
 
 /**
+ * A single element on a reference slide — used to describe layout
+ * composition so the generator can replicate the structure.
+ *
+ * Position is intentionally low-precision (nine grid regions plus
+ * full-bleed and overlay) because pixel-perfect coordinate extraction
+ * from vision models is unreliable. The renderer interprets regions
+ * with sensible defaults; downstream we can add finer control if
+ * needed.
+ */
+export const LayoutElementSchema = z.object({
+  /** What kind of element this is. */
+  type: z.enum([
+    'headline',
+    'body',
+    'image',
+    'callout',
+    'number',
+    'decoration',
+    'logo',
+    'badge',
+    'quote',
+  ]),
+  /** Where on the slide this element sits. */
+  region: z.enum([
+    'top-left',
+    'top-center',
+    'top-right',
+    'middle-left',
+    'middle-center',
+    'middle-right',
+    'bottom-left',
+    'bottom-center',
+    'bottom-right',
+    'full-bleed',
+    'overlay',
+  ]),
+  /** Relative size on the slide. */
+  size: z.enum(['small', 'medium', 'large', 'full']),
+  /** Free-form descriptor of role, e.g. "primary headline", "brand sticker". */
+  role: z.string(),
+  /** Optional free-form details, e.g. "yellow circular shape", "white text". */
+  notes: z.string().optional(),
+})
+
+/** Per-slide layout template extracted from a single reference slide. */
+export const SlideLayoutSchema = z.object({
+  /** Zero-indexed position of this slide in its source reference. */
+  slideIndex: z.number().int().min(0),
+  /** Which reference (post) this slide came from. */
+  postId: z.string().optional(),
+  /**
+   * Composition pattern label. Free-form to give the model flexibility:
+   * e.g. "hero", "centered", "split", "overlay", "data-card", "quote",
+   * "collage", "list", or any other descriptive label that captures
+   * the slide's structural type.
+   */
+  composition: z.string(),
+  /** Elements present on the slide, in approximate visual reading order. */
+  elements: z.array(LayoutElementSchema).default([]),
+  /** Free-form observations: "yellow oval overlapping image bottom-right". */
+  notes: z.string().optional(),
+})
+
+/**
+ * Output of the layout-analysis vision pass.
+ *
+ * For a single reference, `slides` contains per-slide templates the
+ * generator can mirror 1-to-1. For multiple references, `slides`
+ * contains all slides across all references; `patterns` calls out
+ * recurring composition types; `consistency` tells the generator how
+ * much creative freedom it has when synthesizing new slides.
+ */
+export const LayoutSpecSchema = z.object({
+  slides: z.array(SlideLayoutSchema).min(1),
+  /** How visually similar are the slides across the set. */
+  consistency: z.enum(['high', 'medium', 'low']),
+  /**
+   * Recurring composition patterns identified across the slide set.
+   * Empty when only one slide or when slides don't share patterns.
+   */
+  patterns: z
+    .array(
+      z.object({
+        /** Short name, e.g. "hero-with-callout", "centered-quote". */
+        name: z.string(),
+        /** What this pattern looks like. */
+        description: z.string(),
+        /** Indices into the `slides` array where this pattern appears. */
+        slideIndices: z.array(z.number().int().min(0)).default([]),
+      }),
+    )
+    .default([]),
+  /** Free-form overall observations about layout language. */
+  notes: z.string().optional(),
+})
+
+/**
  * Canonical slide purposes the AI should prefer when typing each slide.
  * The renderer has distinct visual treatments for each canonical value:
  *
@@ -542,6 +639,9 @@ export type PlatformFormat = z.infer<typeof PlatformFormatSchema>
 export type Artboard = z.infer<typeof ArtboardSchema>
 export type BrandKit = z.infer<typeof BrandKitSchema>
 export type StyleSpec = z.infer<typeof StyleSpecSchema>
+export type LayoutElement = z.infer<typeof LayoutElementSchema>
+export type SlideLayout = z.infer<typeof SlideLayoutSchema>
+export type LayoutSpec = z.infer<typeof LayoutSpecSchema>
 export type ScriptAnalysis = z.infer<typeof ScriptAnalysisSchema>
 export type ScriptSlidePurpose = z.infer<typeof ScriptSlidePurposeSchema>
 export type CarouselDocument = z.infer<typeof CarouselDocumentSchema>

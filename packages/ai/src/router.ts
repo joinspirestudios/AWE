@@ -39,6 +39,7 @@ import type {
 export const DEFAULT_ROUTES: Readonly<Record<TaskName, readonly ProviderName[]>> = {
   analyzeScript: ['claude', 'gemini'],
   analyzeReference: ['gemini', 'claude'],
+  analyzeLayouts: ['gemini', 'claude'],
   identifyFont: ['gemini', 'claude'],
   embed: ['openai'],
   chat: ['claude', 'gemini'],

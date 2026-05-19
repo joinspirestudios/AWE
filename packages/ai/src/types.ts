@@ -22,6 +22,7 @@
 
 import type {
   FontGuess,
+  LayoutSpec,
   PlatformFormat,
   ScriptAnalysis,
   StyleSpec,
@@ -92,6 +93,25 @@ export interface AnalyzeReferenceRequest {
 }
 
 export type AnalyzeReferenceResult = ProviderResult<StyleSpec>
+
+// =========================================================================
+// TASK: analyzeLayouts
+//
+// Reference image(s) in, LayoutSpec out. Per-slide layout templates plus
+// observed cross-slide patterns. The generator consumes this alongside
+// StyleSpec: StyleSpec tells it how things should look; LayoutSpec tells
+// it how things should be arranged.
+//
+// Primary: Gemini (vision). Fallback: Claude.
+// =========================================================================
+
+export interface AnalyzeLayoutsRequest {
+  /** Same shape as AnalyzeReferenceRequest — these calls share inputs. */
+  images: Array<{ src: string; order: number; postId?: string }>
+  platform?: PlatformFormat
+}
+
+export type AnalyzeLayoutsResult = ProviderResult<LayoutSpec>
 
 // =========================================================================
 // TASK: identifyFont
@@ -231,6 +251,11 @@ export interface AIProvider {
     signal?: AbortSignal,
   ): Promise<AnalyzeReferenceResult>
 
+  analyzeLayouts?(
+    req: AnalyzeLayoutsRequest,
+    signal?: AbortSignal,
+  ): Promise<AnalyzeLayoutsResult>
+
   identifyFont?(
     req: IdentifyFontRequest,
     signal?: AbortSignal,
@@ -256,6 +281,7 @@ export interface AIProvider {
 export type TaskName =
   | 'analyzeScript'
   | 'analyzeReference'
+  | 'analyzeLayouts'
   | 'identifyFont'
   | 'embed'
   | 'chat'
@@ -265,26 +291,30 @@ export type TaskRequest<T extends TaskName> = T extends 'analyzeScript'
   ? AnalyzeScriptRequest
   : T extends 'analyzeReference'
     ? AnalyzeReferenceRequest
-    : T extends 'identifyFont'
-      ? IdentifyFontRequest
-      : T extends 'embed'
-        ? EmbedRequest
-        : T extends 'chat'
-          ? ChatRequest
-          : T extends 'generateImage'
-            ? GenerateImageRequest
-            : never
+    : T extends 'analyzeLayouts'
+      ? AnalyzeLayoutsRequest
+      : T extends 'identifyFont'
+        ? IdentifyFontRequest
+        : T extends 'embed'
+          ? EmbedRequest
+          : T extends 'chat'
+            ? ChatRequest
+            : T extends 'generateImage'
+              ? GenerateImageRequest
+              : never
 
 export type TaskResult<T extends TaskName> = T extends 'analyzeScript'
   ? AnalyzeScriptResult
   : T extends 'analyzeReference'
     ? AnalyzeReferenceResult
-    : T extends 'identifyFont'
-      ? IdentifyFontResult
-      : T extends 'embed'
-        ? EmbedResult
-        : T extends 'chat'
-          ? AsyncIterable<ChatStreamChunk>
-          : T extends 'generateImage'
-            ? GenerateImageResult
-            : never
+    : T extends 'analyzeLayouts'
+      ? AnalyzeLayoutsResult
+      : T extends 'identifyFont'
+        ? IdentifyFontResult
+        : T extends 'embed'
+          ? EmbedResult
+          : T extends 'chat'
+            ? AsyncIterable<ChatStreamChunk>
+            : T extends 'generateImage'
+              ? GenerateImageResult
+              : never

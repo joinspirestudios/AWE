@@ -103,6 +103,59 @@ interface StyleResponse {
   usage: UsageOutput
 }
 
+// LayoutSpec — per-slide composition templates plus recurring patterns
+interface LayoutElement {
+  type:
+    | 'headline'
+    | 'body'
+    | 'image'
+    | 'callout'
+    | 'number'
+    | 'decoration'
+    | 'logo'
+    | 'badge'
+    | 'quote'
+  region:
+    | 'top-left'
+    | 'top-center'
+    | 'top-right'
+    | 'middle-left'
+    | 'middle-center'
+    | 'middle-right'
+    | 'bottom-left'
+    | 'bottom-center'
+    | 'bottom-right'
+    | 'full-bleed'
+    | 'overlay'
+  size: 'small' | 'medium' | 'large' | 'full'
+  role: string
+  notes?: string
+}
+
+interface SlideLayout {
+  slideIndex: number
+  postId?: string
+  composition: string
+  elements: LayoutElement[]
+  notes?: string
+}
+
+interface LayoutSpec {
+  slides: SlideLayout[]
+  consistency: 'high' | 'medium' | 'low'
+  patterns: Array<{
+    name: string
+    description: string
+    slideIndices: number[]
+  }>
+  notes?: string
+}
+
+interface LayoutResponse {
+  layoutSpec: LayoutSpec
+  usage: UsageOutput
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Seed examples
 // ────────────────────────────────────────────────────────────────────────
@@ -210,6 +263,11 @@ export default function TestFunnelPage() {
   const [styleError, setStyleError] = useState<string | null>(null)
   const [styleResult, setStyleResult] = useState<StyleResponse | null>(null)
 
+  // Analysis state (layouts / Gemini, runs in parallel with style)
+  const [analyzingLayouts, setAnalyzingLayouts] = useState(false)
+  const [layoutError, setLayoutError] = useState<string | null>(null)
+  const [layoutResult, setLayoutResult] = useState<LayoutResponse | null>(null)
+
   const [showRaw, setShowRaw] = useState(false)
 
   // ────────────────────────────────────────────────────────────────────────
@@ -289,16 +347,21 @@ export default function TestFunnelPage() {
     // Clear previous results immediately so the UI doesn't show stale state.
     setAnalysisError(null)
     setStyleError(null)
+    setLayoutError(null)
     setAnalysisResult(null)
     setStyleResult(null)
+    setLayoutResult(null)
     setAnalyzing(true)
-    if (references.length > 0) setAnalyzingStyle(true)
+    if (references.length > 0) {
+      setAnalyzingStyle(true)
+      setAnalyzingLayouts(true)
+    }
 
-    // Build the inputs for both passes
+    // Build the inputs for all three passes
     const scriptBody: Record<string, unknown> = { script }
     if (effectiveSlideCount) scriptBody.referenceSlideCount = effectiveSlideCount
 
-    const styleBody = {
+    const visionBody = {
       images: references.flatMap((r) =>
         r.images.map((img) => ({
           src: img.src,
@@ -308,11 +371,16 @@ export default function TestFunnelPage() {
       ),
     }
 
-    // Run in parallel. We don't fail the whole analyze if style fails.
-    const [scriptResult, styleResult] = await Promise.allSettled([
+    // Run all three in parallel. Each settles independently — a failed
+    // vision pass doesn't take down the script analysis or the other
+    // vision call.
+    const [scriptResult, styleResult, layoutResult] = await Promise.allSettled([
       callJson<AnalysisResponse>('/api/analyze-script', scriptBody),
       references.length > 0
-        ? callJson<StyleResponse>('/api/analyze-reference', styleBody)
+        ? callJson<StyleResponse>('/api/analyze-reference', visionBody)
+        : Promise.resolve(null),
+      references.length > 0
+        ? callJson<LayoutResponse>('/api/analyze-layouts', visionBody)
         : Promise.resolve(null),
     ])
 
@@ -336,8 +404,19 @@ export default function TestFunnelPage() {
       )
     }
 
+    if (layoutResult.status === 'fulfilled' && layoutResult.value) {
+      setLayoutResult(layoutResult.value)
+    } else if (layoutResult.status === 'rejected') {
+      setLayoutError(
+        layoutResult.reason instanceof Error
+          ? layoutResult.reason.message
+          : String(layoutResult.reason),
+      )
+    }
+
     setAnalyzing(false)
     setAnalyzingStyle(false)
+    setAnalyzingLayouts(false)
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -541,10 +620,10 @@ export default function TestFunnelPage() {
             <button
               type="button"
               onClick={analyze}
-              disabled={analyzing || analyzingStyle || !script.trim()}
+              disabled={analyzing || analyzingStyle || analyzingLayouts || !script.trim()}
               className="w-full rounded-md bg-white px-4 py-2.5 text-sm font-medium text-neutral-900 transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-400"
             >
-              {analyzing || analyzingStyle ? 'Analyzing…' : 'Analyze'}
+              {analyzing || analyzingStyle || analyzingLayouts ? 'Analyzing…' : 'Analyze'}
             </button>
           </section>
 
@@ -553,7 +632,7 @@ export default function TestFunnelPage() {
             {/* Style spec result */}
             {analyzingStyle && (
               <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 text-sm text-neutral-400">
-                Gemini analyzing references…
+                Gemini analyzing references for style…
               </div>
             )}
             {styleError && (
@@ -562,6 +641,19 @@ export default function TestFunnelPage() {
               </div>
             )}
             {styleResult && <StyleSpecCard data={styleResult} />}
+
+            {/* Layout spec result */}
+            {analyzingLayouts && (
+              <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 text-sm text-neutral-400">
+                Gemini extracting layout templates…
+              </div>
+            )}
+            {layoutError && (
+              <div className="rounded-lg border border-red-900/60 bg-red-950/40 p-4 text-sm text-red-200">
+                <strong>Layout analysis failed:</strong> {layoutError}
+              </div>
+            )}
+            {layoutResult && <LayoutSpecCard data={layoutResult} />}
 
             {/* Script analysis result */}
             <AnalysisPanel
@@ -574,7 +666,7 @@ export default function TestFunnelPage() {
             />
 
             {/* Raw JSON toggle */}
-            {(analysisResult || styleResult) && (
+            {(analysisResult || styleResult || layoutResult) && (
               <>
                 <button
                   type="button"
@@ -586,7 +678,11 @@ export default function TestFunnelPage() {
                 {showRaw && (
                   <pre className="overflow-auto rounded-lg border border-neutral-800 bg-neutral-950 p-4 text-xs text-neutral-300">
                     {JSON.stringify(
-                      { analysis: analysisResult, style: styleResult },
+                      {
+                        analysis: analysisResult,
+                        style: styleResult,
+                        layouts: layoutResult,
+                      },
                       null,
                       2,
                     )}
@@ -1066,6 +1162,277 @@ function StyleSpecCard({ data }: { data: StyleResponse }) {
       </div>
     </div>
   )
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Subcomponent — LayoutSpecCard (read-only display from Gemini)
+//
+// Renders one mini "blueprint" per reference slide showing element
+// placement on a 3×3 grid. Consistency rating + recurring patterns
+// appear in the header / footer of the card.
+// ────────────────────────────────────────────────────────────────────────
+
+function LayoutSpecCard({ data }: { data: LayoutResponse }) {
+  const { layoutSpec, usage } = data
+
+  const consistencyColor: Record<typeof layoutSpec.consistency, string> = {
+    high: 'text-emerald-300',
+    medium: 'text-amber-300',
+    low: 'text-rose-300',
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+      <div className="flex items-center gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-300">
+          Layout spec
+        </h3>
+        <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-[10px] text-neutral-400">
+          Gemini
+        </span>
+        <span className="ml-auto flex items-center gap-3 text-[10px] text-neutral-500">
+          <span>
+            Consistency:{' '}
+            <span className={consistencyColor[layoutSpec.consistency]}>
+              {layoutSpec.consistency}
+            </span>
+          </span>
+          <span>
+            {usage.durationMs} ms · ${usage.estimatedCostUsd?.toFixed(5) ?? '0'}
+          </span>
+        </span>
+      </div>
+
+      {/* Per-slide blueprints */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+        {layoutSpec.slides.map((slide, i) => (
+          <LayoutBlueprint key={i} slide={slide} />
+        ))}
+      </div>
+
+      {/* Recurring patterns */}
+      {layoutSpec.patterns.length > 0 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-neutral-500">
+            Recurring patterns
+          </div>
+          <div className="mt-1 space-y-1.5">
+            {layoutSpec.patterns.map((p, i) => (
+              <div key={i} className="rounded-md bg-neutral-800/60 p-2">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="font-medium text-neutral-100">{p.name}</span>
+                  <span className="text-neutral-500">
+                    slides {p.slideIndices.map((idx) => idx + 1).join(', ')}
+                  </span>
+                </div>
+                <div className="mt-0.5 text-xs text-neutral-400">
+                  {p.description}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Overall notes */}
+      {layoutSpec.notes && (
+        <div className="border-t border-neutral-800 pt-2 text-xs text-neutral-400">
+          {layoutSpec.notes}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LayoutBlueprint({ slide }: { slide: SlideLayout }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-baseline gap-1.5 text-[10px]">
+        <span className="font-mono text-neutral-500">
+          {String(slide.slideIndex + 1).padStart(2, '0')}
+        </span>
+        <span className="truncate text-neutral-300">{slide.composition}</span>
+      </div>
+
+      {/* 3×3 grid visualization of element placement */}
+      <div className="relative aspect-square overflow-hidden rounded-md border border-neutral-800 bg-neutral-950">
+        {/* Grid lines */}
+        <div className="absolute inset-0 grid grid-cols-3 grid-rows-3">
+          {Array.from({ length: 9 }).map((_, i) => (
+            <div
+              key={i}
+              className="border border-neutral-900/60"
+              aria-hidden
+            />
+          ))}
+        </div>
+
+        {/* Elements positioned on the grid */}
+        {slide.elements.map((el, i) => (
+          <ElementMarker key={i} element={el} />
+        ))}
+      </div>
+
+      {/* Element list */}
+      <div className="space-y-0.5 text-[10px] leading-tight text-neutral-400">
+        {slide.elements.map((el, i) => (
+          <div key={i} className="flex items-baseline gap-1.5">
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${elementDotColor(
+                el.type,
+              )}`}
+              aria-hidden
+            />
+            <span className="text-neutral-300">{el.type}</span>
+            <span className="truncate text-neutral-500">{el.role}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ElementMarker({ element }: { element: LayoutElement }) {
+  // Map region → grid cell coordinates (col/row in the 3×3) or special handling.
+  const pos = regionToBox(element.region, element.size)
+  if (!pos) return null
+
+  return (
+    <div
+      className={`absolute flex items-center justify-center rounded-sm border border-neutral-700/80 ${elementBgColor(
+        element.type,
+      )} text-[8px] uppercase tracking-wide text-neutral-100/80`}
+      style={pos}
+      title={`${element.type} · ${element.role}${element.notes ? ` · ${element.notes}` : ''}`}
+    >
+      {abbrevType(element.type)}
+    </div>
+  )
+}
+
+/**
+ * Convert a region + size into a CSS-percentage box on the 3×3 grid.
+ * Returns null if we don't know how to render it (shouldn't happen).
+ */
+function regionToBox(
+  region: LayoutElement['region'],
+  size: LayoutElement['size'],
+): { top: string; left: string; width: string; height: string } | null {
+  if (region === 'full-bleed') {
+    return { top: '4%', left: '4%', width: '92%', height: '92%' }
+  }
+  if (region === 'overlay') {
+    // Drop overlays in the center-ish area, smaller than full
+    return { top: '38%', left: '38%', width: '24%', height: '24%' }
+  }
+  // Parse "<vertical>-<horizontal>"
+  const [v, h] = region.split('-') as [
+    'top' | 'middle' | 'bottom',
+    'left' | 'center' | 'right',
+  ]
+  const colStart = h === 'left' ? 0 : h === 'center' ? 1 : 2
+  const rowStart = v === 'top' ? 0 : v === 'middle' ? 1 : 2
+
+  // Expand size by widening the box around its anchor cell
+  const cellsByCol: Record<typeof size, number> = {
+    small: 1,
+    medium: 1.5,
+    large: 2,
+    full: 3,
+  }
+  const cellsByRow: Record<typeof size, number> = {
+    small: 0.8,
+    medium: 1,
+    large: 1.4,
+    full: 3,
+  }
+  const widthCells = cellsByCol[size] ?? 1
+  const heightCells = cellsByRow[size] ?? 1
+
+  const left = Math.max(0, Math.min(3 - widthCells, colStart + 0.5 - widthCells / 2))
+  const top = Math.max(0, Math.min(3 - heightCells, rowStart + 0.5 - heightCells / 2))
+
+  return {
+    left: `${(left / 3) * 100}%`,
+    top: `${(top / 3) * 100}%`,
+    width: `${(widthCells / 3) * 100}%`,
+    height: `${(heightCells / 3) * 100}%`,
+  }
+}
+
+function elementBgColor(type: LayoutElement['type']): string {
+  switch (type) {
+    case 'headline':
+      return 'bg-amber-500/40'
+    case 'body':
+      return 'bg-neutral-400/30'
+    case 'image':
+      return 'bg-sky-500/30'
+    case 'callout':
+      return 'bg-rose-500/40'
+    case 'number':
+      return 'bg-emerald-500/40'
+    case 'decoration':
+      return 'bg-neutral-600/30'
+    case 'logo':
+      return 'bg-violet-500/40'
+    case 'badge':
+      return 'bg-fuchsia-500/40'
+    case 'quote':
+      return 'bg-teal-500/40'
+    default:
+      return 'bg-neutral-500/30'
+  }
+}
+
+function elementDotColor(type: LayoutElement['type']): string {
+  switch (type) {
+    case 'headline':
+      return 'bg-amber-400'
+    case 'body':
+      return 'bg-neutral-400'
+    case 'image':
+      return 'bg-sky-400'
+    case 'callout':
+      return 'bg-rose-400'
+    case 'number':
+      return 'bg-emerald-400'
+    case 'decoration':
+      return 'bg-neutral-500'
+    case 'logo':
+      return 'bg-violet-400'
+    case 'badge':
+      return 'bg-fuchsia-400'
+    case 'quote':
+      return 'bg-teal-400'
+    default:
+      return 'bg-neutral-500'
+  }
+}
+
+function abbrevType(type: LayoutElement['type']): string {
+  switch (type) {
+    case 'headline':
+      return 'H'
+    case 'body':
+      return 'B'
+    case 'image':
+      return 'IMG'
+    case 'callout':
+      return 'C'
+    case 'number':
+      return '#'
+    case 'decoration':
+      return '·'
+    case 'logo':
+      return 'L'
+    case 'badge':
+      return 'BG'
+    case 'quote':
+      return 'Q'
+    default:
+      return '?'
+  }
 }
 
 function ColorSwatch({

@@ -7,8 +7,14 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk'
-import { ScriptAnalysisSchema } from '@app/scene'
+import { ScriptAnalysisSchema, StyleSpecSchema } from '@app/scene'
 
+import {
+  ANALYZE_REFERENCE_SYSTEM_PROMPT,
+  ANALYZE_REFERENCE_TOOL,
+  ANALYZE_REFERENCE_VERSION,
+  buildAnalyzeReferenceUserMessage,
+} from '../prompts/analyze-reference'
 import {
   ANALYZE_SCRIPT_SYSTEM_PROMPT,
   ANALYZE_SCRIPT_TOOL,
@@ -180,10 +186,145 @@ export class ClaudeProvider implements AIProvider {
   }
 
   async analyzeReference(
-    _req: AnalyzeReferenceRequest,
-    _signal?: AbortSignal,
+    req: AnalyzeReferenceRequest,
+    signal?: AbortSignal,
   ): Promise<AnalyzeReferenceResult> {
-    throw new Error('ClaudeProvider.analyzeReference not implemented')
+    if (req.images.length === 0) {
+      throw new Error('ClaudeProvider.analyzeReference: no images provided')
+    }
+    // Claude vision currently caps at 20 images per request. Tighter than
+    // Gemini's practical limit, but enough for any single carousel set.
+    if (req.images.length > 20) {
+      throw new Error(
+        `ClaudeProvider.analyzeReference: too many images (${req.images.length} > 20). Reduce or chunk the references.`,
+      )
+    }
+
+    const start = Date.now()
+
+    // Download all images server-side, base64-encode each. Claude wants
+    // image content as { type: 'image', source: { type: 'base64', ... } }.
+    const imageBlocks = await Promise.all(
+      req.images.map(async (img) => {
+        const res = await fetch(img.src, { signal })
+        if (!res.ok) {
+          throw new Error(
+            `Failed to download reference image (${res.status}): ${img.src.slice(0, 80)}`,
+          )
+        }
+        const contentType = res.headers.get('content-type') ?? 'image/jpeg'
+        const arrayBuffer = await res.arrayBuffer()
+        const base64 = Buffer.from(arrayBuffer).toString('base64')
+        return {
+          type: 'image' as const,
+          source: {
+            type: 'base64' as const,
+            // Claude's supported MIME types: jpeg, png, gif, webp.
+            media_type: normalizeAnthropicMediaType(contentType),
+            data: base64,
+          },
+        }
+      }),
+    )
+
+    const userText = buildAnalyzeReferenceUserMessage({
+      imageCount: req.images.length,
+      platform: req.platform
+        ? { platform: req.platform.platform, format: req.platform.format }
+        : undefined,
+    })
+
+    // Reuse the same JSON Schema Gemini uses by extracting it from the
+    // shared tool declaration. The wrapper field name differs between
+    // providers (`parameters` vs `input_schema`) but the schema body is
+    // identical.
+    const claudeReferenceTool: Anthropic.Tool = {
+      name: ANALYZE_REFERENCE_TOOL.name ?? 'submit_style_spec',
+      description: ANALYZE_REFERENCE_TOOL.description ?? '',
+      // biome-ignore lint/suspicious/noExplicitAny: same provider-type / JSON-schema mismatch as the Gemini side
+      input_schema: ANALYZE_REFERENCE_TOOL.parameters as any,
+    }
+
+    const response = await this.client.messages.create(
+      {
+        model: this.model,
+        max_tokens: 4_096,
+        system: [
+          {
+            type: 'text',
+            text: ANALYZE_REFERENCE_SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: userText }, ...imageBlocks],
+          },
+        ],
+        tools: [claudeReferenceTool],
+        tool_choice: { type: 'tool', name: claudeReferenceTool.name },
+        metadata: {
+          user_id: `analyze-reference-${ANALYZE_REFERENCE_VERSION}`,
+        },
+      },
+      { signal },
+    )
+
+    if (response.stop_reason === 'max_tokens') {
+      throw new Error(
+        'ClaudeProvider.analyzeReference: response was truncated (hit max_tokens).',
+      )
+    }
+
+    const toolUse = response.content.find(
+      (block): block is Extract<typeof block, { type: 'tool_use' }> =>
+        block.type === 'tool_use',
+    )
+    if (!toolUse) {
+      throw new Error(
+        `ClaudeProvider.analyzeReference: model did not return a tool_use block (stop_reason=${response.stop_reason})`,
+      )
+    }
+
+    const parsed = StyleSpecSchema.safeParse(toolUse.input)
+    if (!parsed.success) {
+      console.error('[analyzeReference:claude] validation failed', {
+        rawToolInput: JSON.stringify(toolUse.input),
+        zodIssues: parsed.error.issues,
+        stopReason: response.stop_reason,
+      })
+      throw new Error(
+        `ClaudeProvider.analyzeReference: tool output failed validation. ${parsed.error.issues.length} issue(s): ${parsed.error.issues
+          .map((i) => `${i.path.join('.')}: ${i.message}`)
+          .join('; ')}`,
+      )
+    }
+
+    const durationMs = Date.now() - start
+    const inputTokens = response.usage.input_tokens
+    const outputTokens = response.usage.output_tokens
+    const cacheReadTokens = response.usage.cache_read_input_tokens ?? 0
+    const cacheCreationTokens = response.usage.cache_creation_input_tokens ?? 0
+
+    return {
+      data: parsed.data,
+      usage: {
+        provider: 'claude',
+        model: this.model,
+        durationMs,
+        inputTokens,
+        outputTokens,
+        cachedInputTokens: cacheReadTokens,
+        estimatedCostUsd: estimateClaudeCost(
+          this.model,
+          inputTokens,
+          outputTokens,
+          cacheReadTokens,
+          cacheCreationTokens,
+        ),
+      },
+    }
   }
 
   async identifyFont(
@@ -200,4 +341,21 @@ export class ClaudeProvider implements AIProvider {
     throw new Error('ClaudeProvider.chat not implemented')
     // biome-ignore lint/correctness/useYield: stub
   }
+}
+
+/**
+ * Normalize a Content-Type to the four image MIME types Claude vision
+ * accepts: image/jpeg, image/png, image/gif, image/webp. Anything else
+ * falls back to jpeg (Supabase serves jpegs by default for our scraped
+ * Instagram references, so this is rarely hit).
+ */
+function normalizeAnthropicMediaType(
+  contentType: string,
+): 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' {
+  const ct = contentType.toLowerCase().split(';')[0]?.trim() ?? ''
+  if (ct === 'image/png') return 'image/png'
+  if (ct === 'image/gif') return 'image/gif'
+  if (ct === 'image/webp') return 'image/webp'
+  // image/jpg, image/jpeg, or anything unknown → jpeg.
+  return 'image/jpeg'
 }

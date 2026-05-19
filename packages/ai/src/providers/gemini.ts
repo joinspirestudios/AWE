@@ -7,17 +7,23 @@
  */
 
 import { FunctionCallingConfigMode, GoogleGenAI } from '@google/genai'
-import { StyleSpecSchema } from '@app/scene'
+import { LayoutSpecSchema, StyleSpecSchema } from '@app/scene'
 
+import {
+  ANALYZE_LAYOUTS_SYSTEM_PROMPT,
+  ANALYZE_LAYOUTS_TOOL,
+  buildAnalyzeLayoutsUserMessage,
+} from '../prompts/analyze-layouts'
 import {
   ANALYZE_REFERENCE_SYSTEM_PROMPT,
   ANALYZE_REFERENCE_TOOL,
-  ANALYZE_REFERENCE_VERSION,
   buildAnalyzeReferenceUserMessage,
 } from '../prompts/analyze-reference'
 import { estimateGeminiCost } from '../pricing'
 import type {
   AIProvider,
+  AnalyzeLayoutsRequest,
+  AnalyzeLayoutsResult,
   AnalyzeReferenceRequest,
   AnalyzeReferenceResult,
   AnalyzeScriptRequest,
@@ -146,6 +152,116 @@ export class GeminiProvider implements AIProvider {
       })
       throw new Error(
         `GeminiProvider.analyzeReference: function output failed validation. ${parsed.error.issues.length} issue(s): ${parsed.error.issues
+          .map((i) => `${i.path.join('.')}: ${i.message}`)
+          .join('; ')}`,
+      )
+    }
+
+    const durationMs = Date.now() - start
+    const usage = response.usageMetadata
+    const inputTokens = usage?.promptTokenCount ?? 0
+    const outputTokens = usage?.candidatesTokenCount ?? 0
+
+    return {
+      data: parsed.data,
+      usage: {
+        provider: 'gemini',
+        model: this.model,
+        durationMs,
+        inputTokens,
+        outputTokens,
+        estimatedCostUsd: estimateGeminiCost(this.model, inputTokens, outputTokens),
+      },
+    }
+  }
+
+  async analyzeLayouts(
+    req: AnalyzeLayoutsRequest,
+    signal?: AbortSignal,
+  ): Promise<AnalyzeLayoutsResult> {
+    if (req.images.length === 0) {
+      throw new Error('GeminiProvider.analyzeLayouts: no images provided')
+    }
+    if (req.images.length > MAX_IMAGES_PER_REQUEST) {
+      throw new Error(
+        `GeminiProvider.analyzeLayouts: too many images (${req.images.length} > ${MAX_IMAGES_PER_REQUEST}). Reduce or chunk the references.`,
+      )
+    }
+
+    const start = Date.now()
+
+    // Same image-encoding strategy as analyzeReference. The two calls run
+    // in parallel from the API route, so the duplicated download cost is
+    // wall-clock-free (just doubled bandwidth into the function).
+    const imageParts = await Promise.all(
+      req.images.map(async (img) => {
+        const res = await fetch(img.src, { signal })
+        if (!res.ok) {
+          throw new Error(
+            `Failed to download reference image (${res.status}): ${img.src.slice(0, 80)}`,
+          )
+        }
+        const contentType = res.headers.get('content-type') ?? 'image/jpeg'
+        const arrayBuffer = await res.arrayBuffer()
+        const base64 = Buffer.from(arrayBuffer).toString('base64')
+        return {
+          inlineData: {
+            mimeType: normalizeMimeType(contentType),
+            data: base64,
+          },
+        }
+      }),
+    )
+
+    const userText = buildAnalyzeLayoutsUserMessage({
+      imageCount: req.images.length,
+      platform: req.platform
+        ? { platform: req.platform.platform, format: req.platform.format }
+        : undefined,
+      // Pass the order + postId mapping so the model uses our indices
+      // verbatim instead of inventing its own.
+      imageOrder: req.images.map((img) => ({
+        order: img.order,
+        postId: img.postId,
+      })),
+    })
+
+    const response = await this.client.models.generateContent({
+      model: this.model,
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: userText }, ...imageParts],
+        },
+      ],
+      config: {
+        systemInstruction: ANALYZE_LAYOUTS_SYSTEM_PROMPT,
+        tools: [{ functionDeclarations: [ANALYZE_LAYOUTS_TOOL] }],
+        toolConfig: {
+          functionCallingConfig: {
+            mode: FunctionCallingConfigMode.ANY,
+            allowedFunctionNames: [ANALYZE_LAYOUTS_TOOL.name ?? ''],
+          },
+        },
+      },
+    })
+
+    const functionCalls = response.functionCalls ?? []
+    const call = functionCalls[0]
+    if (!call || !call.args) {
+      throw new Error(
+        'GeminiProvider.analyzeLayouts: model did not return a function call',
+      )
+    }
+
+    const parsed = LayoutSpecSchema.safeParse(call.args)
+    if (!parsed.success) {
+      console.error('[analyzeLayouts] validation failed', {
+        rawArgs: JSON.stringify(call.args),
+        zodIssues: parsed.error.issues,
+      })
+      throw new Error(
+        `GeminiProvider.analyzeLayouts: function output failed validation. ${parsed.error.issues.length} issue(s): ${parsed.error.issues
           .map((i) => `${i.path.join('.')}: ${i.message}`)
           .join('; ')}`,
       )

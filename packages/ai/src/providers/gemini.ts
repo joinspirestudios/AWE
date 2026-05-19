@@ -46,11 +46,13 @@ import type {
 const DEFAULT_MODEL = 'gemini-2.5-flash'
 
 /**
- * Max images we'll inline-encode in one request. Gemini supports many more,
- * but each adds latency and tokens. Beyond this we'd want a chunked
- * strategy or a different approach.
+ * Max images we'll inline-encode in one request. Gemini supports many more
+ * (the SDK accepts thousands), but each adds latency and tokens. 50 covers
+ * realistic multi-reference workflows — say, three carousels at 10-20
+ * slides each — without becoming a single slow, expensive call. Beyond
+ * this we'd want a chunked strategy.
  */
-const MAX_IMAGES_PER_REQUEST = 24
+const MAX_IMAGES_PER_REQUEST = 50
 
 export interface GeminiProviderOptions {
   apiKey: string

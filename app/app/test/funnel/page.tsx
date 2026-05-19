@@ -1245,6 +1245,18 @@ function LayoutSpecCard({ data }: { data: LayoutResponse }) {
 }
 
 function LayoutBlueprint({ slide }: { slide: SlideLayout }) {
+  // When multiple elements share the same region (common with overlay or
+  // middle-center), they would render at identical positions and the
+  // later one would fully cover the earlier ones. Track each element's
+  // index within its region peer group so we can offset stacked markers
+  // and keep every element visible.
+  const regionCounts = new Map<string, number>()
+  const stackIndices = slide.elements.map((el) => {
+    const current = regionCounts.get(el.region) ?? 0
+    regionCounts.set(el.region, current + 1)
+    return current
+  })
+
   return (
     <div className="space-y-1">
       <div className="flex items-baseline gap-1.5 text-[10px]">
@@ -1269,7 +1281,11 @@ function LayoutBlueprint({ slide }: { slide: SlideLayout }) {
 
         {/* Elements positioned on the grid */}
         {slide.elements.map((el, i) => (
-          <ElementMarker key={i} element={el} />
+          <ElementMarker
+            key={i}
+            element={el}
+            stackIndex={stackIndices[i] ?? 0}
+          />
         ))}
       </div>
 
@@ -1292,17 +1308,37 @@ function LayoutBlueprint({ slide }: { slide: SlideLayout }) {
   )
 }
 
-function ElementMarker({ element }: { element: LayoutElement }) {
+function ElementMarker({
+  element,
+  stackIndex,
+}: {
+  element: LayoutElement
+  stackIndex: number
+}) {
   // Map region → grid cell coordinates (col/row in the 3×3) or special handling.
   const pos = regionToBox(element.region, element.size)
   if (!pos) return null
+
+  // Offset stacked markers by a few pixels so each is partially visible.
+  // Full-bleed gets no offset — it should always span the whole canvas;
+  // a stack of full-bleeds just means later ones paint on top, which
+  // visually conveys the layering anyway.
+  const shouldOffset = stackIndex > 0 && element.region !== 'full-bleed'
+  const offsetPx = shouldOffset ? stackIndex * 6 : 0
 
   return (
     <div
       className={`absolute flex items-center justify-center rounded-sm border border-neutral-700/80 ${elementBgColor(
         element.type,
       )} text-[8px] uppercase tracking-wide text-neutral-100/80`}
-      style={pos}
+      style={{
+        ...pos,
+        transform: offsetPx > 0 ? `translate(${offsetPx}px, ${offsetPx}px)` : undefined,
+        // Stacking order follows array order — later elements paint above
+        // earlier ones, matching the convention that elements listed later
+        // in the model output are visually higher on the slide.
+        zIndex: stackIndex + 1,
+      }}
       title={`${element.type} · ${element.role}${element.notes ? ` · ${element.notes}` : ''}`}
     >
       {abbrevType(element.type)}

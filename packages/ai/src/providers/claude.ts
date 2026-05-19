@@ -192,11 +192,11 @@ export class ClaudeProvider implements AIProvider {
     if (req.images.length === 0) {
       throw new Error('ClaudeProvider.analyzeReference: no images provided')
     }
-    // Claude vision currently caps at 20 images per request. Tighter than
-    // Gemini's practical limit, but enough for any single carousel set.
-    if (req.images.length > 20) {
+    // Claude vision supports up to 100 images per API request. 50 matches
+    // our route-level cap and keeps a single call's latency reasonable.
+    if (req.images.length > 50) {
       throw new Error(
-        `ClaudeProvider.analyzeReference: too many images (${req.images.length} > 20). Reduce or chunk the references.`,
+        `ClaudeProvider.analyzeReference: too many images (${req.images.length} > 50). Reduce or chunk the references.`,
       )
     }
 

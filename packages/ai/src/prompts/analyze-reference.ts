@@ -14,7 +14,7 @@
 
 import type { FunctionDeclaration } from '@google/genai'
 
-export const ANALYZE_REFERENCE_VERSION = 'v1.0.0'
+export const ANALYZE_REFERENCE_VERSION = 'v1.0.1'
 
 export const ANALYZE_REFERENCE_SYSTEM_PROMPT = `You are a senior visual systems designer analyzing reference carousels to extract a portable style specification.
 
@@ -26,10 +26,14 @@ For every field in the StyleSpec, base your answer on what you actually see in t
 
 ### colors
 
-- primary — the dominant 1 to 4 colors that define the look. The background colors, the main text colors. Hex strings ('#RRGGBB').
-- accents — secondary colors used for highlights, callouts, emphasis. Often 0 to 3 colors. May be empty if the references are monochromatic.
+The palette captures the BRAND identity — colors a designer chose for backgrounds, text, callouts, shapes, decorative elements, and consistent overlay treatments. It does NOT include colors from photographic content within images (a dress in a portrait, food on a plate, sky in a landscape, a product shot). Those colors belong to the content the creator placed in the slide, not to the slide's design language. The creator may swap out their photos at any time; only what would remain across photo swaps counts as brand.
 
-Sample colors from the actual pixels — do not approximate.
+Mental test for every color you consider including: "If the creator replaced every photo on these slides with a different photo, would this color still appear somewhere?" If yes → it's brand, include it. If no → it's content, skip it.
+
+- primary — the 1 to 4 dominant BRAND colors. Slide backgrounds, headline/body text fills, callout fills, decorative shapes. Hex strings ('#RRGGBB').
+- accents — secondary brand colors used for highlights or emphasis. Often 0 to 3 colors. May be empty for monochromatic references.
+
+Sample colors from the actual pixels of brand elements — do not approximate to nearby web-safe values.
 
 ### typography
 

@@ -41,7 +41,7 @@ const RequestSchema = z.object({
       }),
     )
     .min(1, 'At least one image is required')
-    .max(24, 'Too many images (max 24)'),
+    .max(50, 'Too many images (max 50)'),
   platform: PlatformFormatSchema.optional(),
 })
 
@@ -55,8 +55,11 @@ export async function POST(req: NextRequest) {
 
   const parsed = RequestSchema.safeParse(body)
   if (!parsed.success) {
+    const message = parsed.error.issues
+      .map((i) => `${i.path.join('.') || 'request'}: ${i.message}`)
+      .join('; ')
     return NextResponse.json(
-      { error: 'Invalid request', details: parsed.error.flatten() },
+      { error: 'Invalid request', message, details: parsed.error.flatten() },
       { status: 400 },
     )
   }

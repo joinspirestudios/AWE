@@ -1,14 +1,21 @@
 /**
  * Claude provider — Anthropic SDK adapter.
  *
- * Implements: analyzeScript.
- * Stubbed (not implemented yet): analyzeReference, identifyFont, chat.
+ * Implements: analyzeScript, analyzeReference (vision), analyzeLayouts (vision).
+ * Stubbed (not implemented yet): identifyFont, chat.
  * Skips by design: embed (use OpenAI), generateImage (use Replicate).
  */
 
 import Anthropic from '@anthropic-ai/sdk'
-import { ScriptAnalysisSchema, StyleSpecSchema } from '@app/scene'
+import { LayoutSpecSchema, ScriptAnalysisSchema, StyleSpecSchema } from '@app/scene'
 
+import {
+  ANALYZE_LAYOUTS_INPUT_SCHEMA,
+  ANALYZE_LAYOUTS_SYSTEM_PROMPT,
+  ANALYZE_LAYOUTS_TOOL,
+  ANALYZE_LAYOUTS_VERSION,
+  buildAnalyzeLayoutsUserMessage,
+} from '../prompts/analyze-layouts'
 import {
   ANALYZE_REFERENCE_INPUT_SCHEMA,
   ANALYZE_REFERENCE_SYSTEM_PROMPT,
@@ -25,6 +32,8 @@ import {
 import { estimateClaudeCost } from '../pricing'
 import type {
   AIProvider,
+  AnalyzeLayoutsRequest,
+  AnalyzeLayoutsResult,
   AnalyzeReferenceRequest,
   AnalyzeReferenceResult,
   AnalyzeScriptRequest,
@@ -297,6 +306,148 @@ export class ClaudeProvider implements AIProvider {
       })
       throw new Error(
         `ClaudeProvider.analyzeReference: tool output failed validation. ${parsed.error.issues.length} issue(s): ${parsed.error.issues
+          .map((i) => `${i.path.join('.')}: ${i.message}`)
+          .join('; ')}`,
+      )
+    }
+
+    const durationMs = Date.now() - start
+    const inputTokens = response.usage.input_tokens
+    const outputTokens = response.usage.output_tokens
+    const cacheReadTokens = response.usage.cache_read_input_tokens ?? 0
+    const cacheCreationTokens = response.usage.cache_creation_input_tokens ?? 0
+
+    return {
+      data: parsed.data,
+      usage: {
+        provider: 'claude',
+        model: this.model,
+        durationMs,
+        inputTokens,
+        outputTokens,
+        cachedInputTokens: cacheReadTokens,
+        estimatedCostUsd: estimateClaudeCost(
+          this.model,
+          inputTokens,
+          outputTokens,
+          cacheReadTokens,
+          cacheCreationTokens,
+        ),
+      },
+    }
+  }
+
+  async analyzeLayouts(
+    req: AnalyzeLayoutsRequest,
+    signal?: AbortSignal,
+  ): Promise<AnalyzeLayoutsResult> {
+    if (req.images.length === 0) {
+      throw new Error('ClaudeProvider.analyzeLayouts: no images provided')
+    }
+    if (req.images.length > 50) {
+      throw new Error(
+        `ClaudeProvider.analyzeLayouts: too many images (${req.images.length} > 50). Reduce or chunk the references.`,
+      )
+    }
+
+    const start = Date.now()
+
+    const imageBlocks = await Promise.all(
+      req.images.map(async (img) => {
+        const res = await fetch(img.src, { signal })
+        if (!res.ok) {
+          throw new Error(
+            `Failed to download reference image (${res.status}): ${img.src.slice(0, 80)}`,
+          )
+        }
+        const contentType = res.headers.get('content-type') ?? 'image/jpeg'
+        const arrayBuffer = await res.arrayBuffer()
+        const base64 = Buffer.from(arrayBuffer).toString('base64')
+        return {
+          type: 'image' as const,
+          source: {
+            type: 'base64' as const,
+            media_type: normalizeAnthropicMediaType(contentType),
+            data: base64,
+          },
+        }
+      }),
+    )
+
+    const userText = buildAnalyzeLayoutsUserMessage({
+      imageCount: req.images.length,
+      platform: req.platform
+        ? { platform: req.platform.platform, format: req.platform.format }
+        : undefined,
+      imageOrder: req.images.map((img) => ({
+        order: img.order,
+        postId: img.postId,
+      })),
+    })
+
+    // Use the canonical schema (pristine lowercase 'object' types) — NOT
+    // ANALYZE_LAYOUTS_TOOL.parameters, which the Gemini SDK mutates in
+    // place. See the matching comment in analyzeReference above.
+    const claudeLayoutsTool: Anthropic.Tool = {
+      name: ANALYZE_LAYOUTS_TOOL.name ?? 'submit_layout_spec',
+      description: ANALYZE_LAYOUTS_TOOL.description ?? '',
+      input_schema: ANALYZE_LAYOUTS_INPUT_SCHEMA,
+    }
+
+    // LayoutSpec output scales with slide count. Each SlideLayout is
+    // ~150-300 tokens; with 50 slides plus patterns and notes, we can
+    // easily need 12-15k output tokens. 16384 leaves comfortable headroom.
+    const response = await this.client.messages.create(
+      {
+        model: this.model,
+        max_tokens: 16_384,
+        system: [
+          {
+            type: 'text',
+            text: ANALYZE_LAYOUTS_SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: userText }, ...imageBlocks],
+          },
+        ],
+        tools: [claudeLayoutsTool],
+        tool_choice: { type: 'tool', name: claudeLayoutsTool.name },
+        metadata: {
+          user_id: `analyze-layouts-${ANALYZE_LAYOUTS_VERSION}`,
+        },
+      },
+      { signal },
+    )
+
+    if (response.stop_reason === 'max_tokens') {
+      throw new Error(
+        'ClaudeProvider.analyzeLayouts: response was truncated (hit max_tokens). The reference set is too large for a single pass — consider chunking.',
+      )
+    }
+
+    const toolUse = response.content.find(
+      (block): block is Extract<typeof block, { type: 'tool_use' }> =>
+        block.type === 'tool_use',
+    )
+    if (!toolUse) {
+      throw new Error(
+        `ClaudeProvider.analyzeLayouts: model did not return a tool_use block (stop_reason=${response.stop_reason})`,
+      )
+    }
+
+    const parsed = LayoutSpecSchema.safeParse(toolUse.input)
+    if (!parsed.success) {
+      console.error('[analyzeLayouts:claude] validation failed', {
+        rawToolInput: JSON.stringify(toolUse.input),
+        zodIssues: parsed.error.issues,
+        stopReason: response.stop_reason,
+      })
+      throw new Error(
+        `ClaudeProvider.analyzeLayouts: tool output failed validation. ${parsed.error.issues.length} issue(s): ${parsed.error.issues
           .map((i) => `${i.path.join('.')}: ${i.message}`)
           .join('; ')}`,
       )

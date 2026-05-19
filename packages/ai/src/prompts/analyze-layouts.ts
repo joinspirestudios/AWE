@@ -136,15 +136,17 @@ Before calling the tool, think through:
 Then return the LayoutSpec via the submit_layout_spec tool. Output via the tool only — no prose response.`
 
 /**
- * Gemini FunctionDeclaration mirroring LayoutSpecSchema. Forces structured
- * output. If you change the schema in @app/scene, mirror it here.
+ * Raw JSON Schema for the LayoutSpec tool input. SINGLE SOURCE OF TRUTH
+ * for the schema across providers. Mirrors LayoutSpecSchema in
+ * @app/scene exactly.
+ *
+ * Exported so Claude can read from a pristine copy. See the matching
+ * comment in analyze-reference.ts for the full rationale — short
+ * version: @google/genai mutates tool schemas in place, so Claude
+ * must never read .parameters from a tool already passed to Gemini.
  */
-export const ANALYZE_LAYOUTS_TOOL: FunctionDeclaration = {
-  name: 'submit_layout_spec',
-  description:
-    'Return the extracted layout specification — per-slide composition templates plus recurring patterns and a consistency rating.',
-  // biome-ignore lint/suspicious/noExplicitAny: Gemini's Schema type doesn't match JSON Schema 1:1, but the API accepts JSON Schema at runtime.
-  parameters: {
+// biome-ignore lint/suspicious/noExplicitAny: JSON Schema escape hatch
+export const ANALYZE_LAYOUTS_INPUT_SCHEMA: any = {
     type: 'object',
     required: ['slides', 'consistency', 'patterns'],
     properties: {
@@ -258,8 +260,18 @@ export const ANALYZE_LAYOUTS_TOOL: FunctionDeclaration = {
           'Optional 1-2 sentences on the overall layout language. Skip if nothing distinctive.',
       },
     },
-    // biome-ignore lint/suspicious/noExplicitAny: see above
-  } as any,
+  }
+
+/**
+ * Gemini function declaration. We pass a deep clone of the shared
+ * schema so the Gemini SDK's in-place normalization doesn't corrupt
+ * the canonical constant (which Claude also reads from).
+ */
+export const ANALYZE_LAYOUTS_TOOL: FunctionDeclaration = {
+  name: 'submit_layout_spec',
+  description:
+    'Return the extracted layout specification — per-slide composition templates plus recurring patterns and a consistency rating.',
+  parameters: structuredClone(ANALYZE_LAYOUTS_INPUT_SCHEMA),
 }
 
 /**

@@ -130,6 +130,11 @@ export class GeminiProvider implements AIProvider {
             allowedFunctionNames: [ANALYZE_REFERENCE_TOOL.name ?? ''],
           },
         },
+        // Forward the caller's AbortSignal so router-level timeouts can
+        // actually cancel an in-flight Gemini request. Without this, a
+        // hung Gemini call ignores the abort and burns the whole Vercel
+        // function budget.
+        abortSignal: signal,
         // NOTE: do not pass `labels` here — that's a Vertex AI field and
         // the Gemini Developer API rejects it at request time. We tag the
         // prompt version in the system prompt itself instead.
@@ -245,6 +250,7 @@ export class GeminiProvider implements AIProvider {
             allowedFunctionNames: [ANALYZE_LAYOUTS_TOOL.name ?? ''],
           },
         },
+        abortSignal: signal,
       },
     })
 

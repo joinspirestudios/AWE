@@ -46,6 +46,13 @@ export const DEFAULT_ROUTES: Readonly<Record<TaskName, readonly ProviderName[]>>
   generateImage: ['replicate'],
 }
 
+/**
+ * Per-attempt timeout for non-streaming tasks. Sized so a primary that
+ * hangs to the wire still leaves room for one fallback within Vercel's
+ * 60s Hobby-plan function ceiling (28s + 28s + overhead < 60s).
+ */
+const PER_ATTEMPT_TIMEOUT_MS = 28_000
+
 export interface RouterOptions {
   providers: AIProvider[]
   /** Override the default routing for any subset of tasks. */
@@ -72,6 +79,12 @@ export class AIRouter {
   /**
    * Run a non-streaming task. Returns the first provider's successful
    * result. Use `stream()` for chat (streaming tasks).
+   *
+   * Each provider attempt is wrapped in a per-attempt timeout (default
+   * 28s) so a hung primary doesn't burn the entire route budget. Within
+   * Vercel's 60s function ceiling, that leaves ~28s for a fallback if
+   * the primary hangs to the wire. Caller-supplied AbortSignals are
+   * still honored.
    */
   async run<T extends Exclude<TaskName, 'chat'>>(
     task: T,
@@ -88,11 +101,23 @@ export class AIRouter {
       const method = (provider as unknown as Record<string, unknown>)[task]
       if (typeof method !== 'function') continue
 
+      // Per-attempt AbortController with a hard timeout. Linked to the
+      // caller's signal (if any) so external aborts still propagate.
+      const attemptController = new AbortController()
+      const onParentAbort = () => attemptController.abort()
+      signal?.addEventListener('abort', onParentAbort)
+      const timeoutId = setTimeout(
+        () => attemptController.abort(),
+        PER_ATTEMPT_TIMEOUT_MS,
+      )
+
       try {
-        const result = (await (method as (
-          req: TaskRequest<T>,
-          signal?: AbortSignal,
-        ) => Promise<TaskResult<T>>).call(provider, request, signal)) as TaskResult<T>
+        const result = (await (
+          method as (
+            req: TaskRequest<T>,
+            signal?: AbortSignal,
+          ) => Promise<TaskResult<T>>
+        ).call(provider, request, attemptController.signal)) as TaskResult<T>
 
         const usage = (result as unknown as { usage?: ProviderUsage }).usage
         if (usage) this.onUsage?.(task, usage)
@@ -100,10 +125,23 @@ export class AIRouter {
         return result
       } catch (err) {
         const error = err as Error
-        lastError = error
-        this.onError?.(task, providerName, error)
-        // Caller aborted — don't try fallbacks.
-        if (signal?.aborted) throw error
+        // If our internal timeout fired (and the caller didn't abort),
+        // surface a clean per-provider timeout error so logs show why
+        // we fell over.
+        const isOurTimeout =
+          attemptController.signal.aborted && !signal?.aborted
+        const wrappedError = isOurTimeout
+          ? new Error(
+              `Provider ${providerName} exceeded ${PER_ATTEMPT_TIMEOUT_MS}ms timeout (${error.message})`,
+            )
+          : error
+        lastError = wrappedError
+        this.onError?.(task, providerName, wrappedError)
+        // Caller-initiated abort — stop the whole chain.
+        if (signal?.aborted) throw wrappedError
+      } finally {
+        clearTimeout(timeoutId)
+        signal?.removeEventListener('abort', onParentAbort)
       }
     }
 

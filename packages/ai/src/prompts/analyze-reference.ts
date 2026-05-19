@@ -90,15 +90,20 @@ Return up to 6 motifs. Skip generic descriptors that apply to most carousels.
 Call the submit_style_spec function with your structured result. Do not include any text outside the function call.`
 
 /**
- * Gemini function declaration. The parameters schema is JSON Schema; it
- * mirrors StyleSpecSchema in @app/scene exactly.
+ * Raw JSON Schema for the StyleSpec tool input. SINGLE SOURCE OF TRUTH
+ * for the schema across providers — both Gemini and Claude tool
+ * definitions derive from this.
+ *
+ * Why this is exported separately: the @google/genai SDK normalizes
+ * tool schemas in place when it processes them (e.g. converts lowercase
+ * `type: 'object'` to its internal `Type.OBJECT` enum, which then
+ * serializes as 'OBJECT'). That mutation leaks back into our shared
+ * reference, breaking Anthropic's API which expects lowercase 'object'.
+ * Keeping a pristine constant here and giving Gemini a deep copy
+ * prevents cross-SDK contamination.
  */
-export const ANALYZE_REFERENCE_TOOL: FunctionDeclaration = {
-  name: 'submit_style_spec',
-  description:
-    'Submit the structured style specification extracted from the reference images. Always call this exactly once.',
-  // biome-ignore lint/suspicious/noExplicitAny: Gemini's Schema type doesn't match JSON Schema 1:1, but the API accepts JSON Schema at runtime.
-  parameters: {
+// biome-ignore lint/suspicious/noExplicitAny: JSON Schema escape hatch — provider SDK types diverge from raw JSON Schema
+export const ANALYZE_REFERENCE_INPUT_SCHEMA: any = {
     type: 'object',
     required: ['colors', 'typography', 'layout', 'background', 'motifs', 'slidePattern'],
     properties: {
@@ -200,8 +205,18 @@ export const ANALYZE_REFERENCE_TOOL: FunctionDeclaration = {
         enum: ['consistent', 'varied', 'progressive'],
       },
     },
-    // biome-ignore lint/suspicious/noExplicitAny: see above
-  } as any,
+  }
+
+/**
+ * Gemini function declaration. We pass a deep clone of the shared
+ * schema so the Gemini SDK's in-place normalization doesn't corrupt
+ * the canonical constant (which Claude also reads from).
+ */
+export const ANALYZE_REFERENCE_TOOL: FunctionDeclaration = {
+  name: 'submit_style_spec',
+  description:
+    'Submit the structured style specification extracted from the reference images. Always call this exactly once.',
+  parameters: structuredClone(ANALYZE_REFERENCE_INPUT_SCHEMA),
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: see above

@@ -10,6 +10,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { ScriptAnalysisSchema, StyleSpecSchema } from '@app/scene'
 
 import {
+  ANALYZE_REFERENCE_INPUT_SCHEMA,
   ANALYZE_REFERENCE_SYSTEM_PROMPT,
   ANALYZE_REFERENCE_TOOL,
   ANALYZE_REFERENCE_VERSION,
@@ -234,15 +235,15 @@ export class ClaudeProvider implements AIProvider {
         : undefined,
     })
 
-    // Reuse the same JSON Schema Gemini uses by extracting it from the
-    // shared tool declaration. The wrapper field name differs between
-    // providers (`parameters` vs `input_schema`) but the schema body is
-    // identical.
+    // Use the canonical schema (pristine lowercase 'object' types) — do
+    // NOT read from ANALYZE_REFERENCE_TOOL.parameters because the Gemini
+    // SDK normalizes that object in place when it serializes tools, which
+    // would leak uppercase 'OBJECT' into Anthropic's request and trigger
+    // a 400.
     const claudeReferenceTool: Anthropic.Tool = {
       name: ANALYZE_REFERENCE_TOOL.name ?? 'submit_style_spec',
       description: ANALYZE_REFERENCE_TOOL.description ?? '',
-      // biome-ignore lint/suspicious/noExplicitAny: same provider-type / JSON-schema mismatch as the Gemini side
-      input_schema: ANALYZE_REFERENCE_TOOL.parameters as any,
+      input_schema: ANALYZE_REFERENCE_INPUT_SCHEMA,
     }
 
     const response = await this.client.messages.create(

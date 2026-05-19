@@ -21,11 +21,22 @@
  * Re-running Analyze overwrites edits with a fresh response.
  */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 // ────────────────────────────────────────────────────────────────────────
 // Types
 // ────────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-task analysis state stored on each Reference. Lets the UI render
+ * shimmer / done / error / retry transitions per task without needing
+ * a separate side-state map.
+ */
+type AnalysisState<T> =
+  | { status: 'pending' }
+  | { status: 'running'; startedAt: number }
+  | { status: 'done'; data: T; usage: UsageOutput }
+  | { status: 'error'; message: string }
 
 interface Reference {
   id: string
@@ -35,6 +46,10 @@ interface Reference {
   uploadedAt: string
   ownerUsername?: string
   caption?: string
+  /** Style analysis state (vision: colors, type, layout, motifs). */
+  styleAnalysis: AnalysisState<StyleSpec>
+  /** Layout analysis state (vision: per-slide composition). */
+  layoutsAnalysis: AnalysisState<LayoutSpec>
 }
 
 interface SlideOutput {
@@ -234,6 +249,40 @@ function purposeStyle(purpose: string): string {
 const INLINE_INPUT =
   '-mx-2 -my-1 rounded px-2 py-1 bg-transparent transition hover:bg-neutral-800/40 focus:bg-neutral-800/60 focus:outline-none border-0 w-full'
 
+// Layout-extraction sampling. analyzeLayouts output is one structured
+// SlideLayout per image plus pattern detection across the set, so total
+// output tokens scale roughly linearly with input count. With our 28s
+// per-attempt timeout (sized to keep one fallback within Vercel's 60s
+// function ceiling), the empirical ceiling is ~12-16 slides.
+//
+// Distribution: 3 first + 2 middle + 3 last. Captures the carousel's
+// structural arc — hook, body, close — instead of just the intro.
+const MAX_SLIDES_PER_REF_FOR_LAYOUTS = 8
+const MAX_TOTAL_SLIDES_FOR_LAYOUTS = 16
+
+/** Hard cap on references the UI accepts. */
+const MAX_REFERENCES = 4
+
+/**
+ * Sample slides across a reference's arc. Returns the original array
+ * if it's already at or below max; otherwise picks first 3, middle 2,
+ * and last 3 in order.
+ */
+function sampleSlidesAcrossArc<T>(
+  slides: T[],
+  max: number = MAX_SLIDES_PER_REF_FOR_LAYOUTS,
+): T[] {
+  if (slides.length <= max) return slides
+  const firstN = 3
+  const lastN = 3
+  const middleN = max - firstN - lastN // 2 when max=8
+  const first = slides.slice(0, firstN)
+  const last = slides.slice(-lastN)
+  const middleStart = Math.floor((slides.length - middleN) / 2)
+  const middle = slides.slice(middleStart, middleStart + middleN)
+  return [...first, ...middle, ...last]
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Page
 // ────────────────────────────────────────────────────────────────────────
@@ -267,6 +316,13 @@ export default function TestFunnelPage() {
   const [analyzingLayouts, setAnalyzingLayouts] = useState(false)
   const [layoutError, setLayoutError] = useState<string | null>(null)
   const [layoutResult, setLayoutResult] = useState<LayoutResponse | null>(null)
+  // When the slides we send to /api/analyze-layouts is fewer than the
+  // total slides available, this tells the UI to surface the sampling
+  // so the user knows we capped on their behalf.
+  const [layoutsSamplingInfo, setLayoutsSamplingInfo] = useState<{
+    analyzed: number
+    total: number
+  } | null>(null)
 
   const [showRaw, setShowRaw] = useState(false)
 
@@ -302,6 +358,12 @@ export default function TestFunnelPage() {
 
   async function fetchReference() {
     if (!referenceUrl.trim()) return
+    if (references.length >= MAX_REFERENCES) {
+      setRefError(
+        `Reference cap reached (${MAX_REFERENCES}). Remove one before adding another.`,
+      )
+      return
+    }
     setFetchingRef(true)
     setRefError(null)
     try {
@@ -316,13 +378,22 @@ export default function TestFunnelPage() {
           data?.message ?? data?.error ?? `Request failed (${res.status})`,
         )
       }
+      // Reference lands in 'pending' state for both analyses, then we
+      // immediately fire both calls in the background. The UI shows
+      // shimmer while each is in-flight, the cached result when done,
+      // and a retry button on error.
       const ref: Reference = {
         ...data.reference,
         ownerUsername: data.meta?.ownerUsername,
         caption: data.meta?.caption,
+        styleAnalysis: { status: 'pending' },
+        layoutsAnalysis: { status: 'pending' },
       }
       setReferences((prev) => [...prev, ref])
       setReferenceUrl('')
+      // Fire eagerly — don't await. Each call updates the reference's
+      // analysis state via setReferences when it settles.
+      void runReferenceAnalysis(ref)
     } catch (err) {
       setRefError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
@@ -332,6 +403,202 @@ export default function TestFunnelPage() {
 
   function removeReference(id: string) {
     setReferences((prev) => prev.filter((r) => r.id !== id))
+  }
+
+  /**
+   * Kick off both vision analyses for a single reference in parallel.
+   * Each settles independently and patches its own state slot. We sample
+   * the slides for analyzeLayouts (3 + 2 + 3 across the arc) because
+   * each slide adds output tokens; analyzeReference gets all slides
+   * because its output is constant-sized.
+   */
+  async function runReferenceAnalysis(ref: Reference) {
+    // Mark both as running
+    setReferences((prev) =>
+      prev.map((r) =>
+        r.id === ref.id
+          ? {
+              ...r,
+              styleAnalysis: { status: 'running', startedAt: Date.now() },
+              layoutsAnalysis: { status: 'running', startedAt: Date.now() },
+            }
+          : r,
+      ),
+    )
+
+    const styleBody = {
+      images: ref.images.map((img) => ({
+        src: img.src,
+        order: img.order,
+        postId: ref.id,
+      })),
+    }
+
+    const layoutsBody = {
+      images: sampleSlidesAcrossArc(ref.images).map((img) => ({
+        src: img.src,
+        order: img.order,
+        postId: ref.id,
+      })),
+    }
+
+    const stylePromise = callJson<StyleResponse>(
+      '/api/analyze-reference',
+      styleBody,
+    )
+      .then((data) => {
+        setReferences((prev) =>
+          prev.map((r) =>
+            r.id === ref.id
+              ? {
+                  ...r,
+                  styleAnalysis: {
+                    status: 'done',
+                    data: data.styleSpec,
+                    usage: data.usage,
+                  },
+                }
+              : r,
+          ),
+        )
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err)
+        setReferences((prev) =>
+          prev.map((r) =>
+            r.id === ref.id
+              ? { ...r, styleAnalysis: { status: 'error', message } }
+              : r,
+          ),
+        )
+      })
+
+    const layoutsPromise = callJson<LayoutResponse>(
+      '/api/analyze-layouts',
+      layoutsBody,
+    )
+      .then((data) => {
+        setReferences((prev) =>
+          prev.map((r) =>
+            r.id === ref.id
+              ? {
+                  ...r,
+                  layoutsAnalysis: {
+                    status: 'done',
+                    data: data.layoutSpec,
+                    usage: data.usage,
+                  },
+                }
+              : r,
+          ),
+        )
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err)
+        setReferences((prev) =>
+          prev.map((r) =>
+            r.id === ref.id
+              ? { ...r, layoutsAnalysis: { status: 'error', message } }
+              : r,
+          ),
+        )
+      })
+
+    await Promise.all([stylePromise, layoutsPromise])
+  }
+
+  /**
+   * Retry a single failed analysis task on a reference without
+   * re-running the successful one.
+   */
+  async function retryReferenceAnalysis(
+    refId: string,
+    task: 'style' | 'layouts',
+  ) {
+    const ref = references.find((r) => r.id === refId)
+    if (!ref) return
+
+    if (task === 'style') {
+      setReferences((prev) =>
+        prev.map((r) =>
+          r.id === refId
+            ? { ...r, styleAnalysis: { status: 'running', startedAt: Date.now() } }
+            : r,
+        ),
+      )
+      try {
+        const data = await callJson<StyleResponse>('/api/analyze-reference', {
+          images: ref.images.map((img) => ({
+            src: img.src,
+            order: img.order,
+            postId: ref.id,
+          })),
+        })
+        setReferences((prev) =>
+          prev.map((r) =>
+            r.id === refId
+              ? {
+                  ...r,
+                  styleAnalysis: {
+                    status: 'done',
+                    data: data.styleSpec,
+                    usage: data.usage,
+                  },
+                }
+              : r,
+          ),
+        )
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        setReferences((prev) =>
+          prev.map((r) =>
+            r.id === refId
+              ? { ...r, styleAnalysis: { status: 'error', message } }
+              : r,
+          ),
+        )
+      }
+    } else {
+      setReferences((prev) =>
+        prev.map((r) =>
+          r.id === refId
+            ? { ...r, layoutsAnalysis: { status: 'running', startedAt: Date.now() } }
+            : r,
+        ),
+      )
+      try {
+        const data = await callJson<LayoutResponse>('/api/analyze-layouts', {
+          images: sampleSlidesAcrossArc(ref.images).map((img) => ({
+            src: img.src,
+            order: img.order,
+            postId: ref.id,
+          })),
+        })
+        setReferences((prev) =>
+          prev.map((r) =>
+            r.id === refId
+              ? {
+                  ...r,
+                  layoutsAnalysis: {
+                    status: 'done',
+                    data: data.layoutSpec,
+                    usage: data.usage,
+                  },
+                }
+              : r,
+          ),
+        )
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        setReferences((prev) =>
+          prev.map((r) =>
+            r.id === refId
+              ? { ...r, layoutsAnalysis: { status: 'error', message } }
+              : r,
+          ),
+        )
+      }
+    }
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -344,7 +611,6 @@ export default function TestFunnelPage() {
       return
     }
 
-    // Clear previous results immediately so the UI doesn't show stale state.
     setAnalysisError(null)
     setStyleError(null)
     setLayoutError(null)
@@ -352,71 +618,32 @@ export default function TestFunnelPage() {
     setStyleResult(null)
     setLayoutResult(null)
     setAnalyzing(true)
-    if (references.length > 0) {
-      setAnalyzingStyle(true)
-      setAnalyzingLayouts(true)
-    }
 
-    // Build the inputs for all three passes
+    // Script analysis fires immediately — it doesn't depend on the
+    // references, so the user sees progress before any vision work
+    // settles. The vision results will appear later from the cached
+    // per-reference state.
     const scriptBody: Record<string, unknown> = { script }
     if (effectiveSlideCount) scriptBody.referenceSlideCount = effectiveSlideCount
 
-    const visionBody = {
-      images: references.flatMap((r) =>
-        r.images.map((img) => ({
-          src: img.src,
-          order: img.order,
-          postId: r.id,
-        })),
-      ),
-    }
-
-    // Run all three in parallel. Each settles independently — a failed
-    // vision pass doesn't take down the script analysis or the other
-    // vision call.
-    const [scriptResult, styleResult, layoutResult] = await Promise.allSettled([
-      callJson<AnalysisResponse>('/api/analyze-script', scriptBody),
-      references.length > 0
-        ? callJson<StyleResponse>('/api/analyze-reference', visionBody)
-        : Promise.resolve(null),
-      references.length > 0
-        ? callJson<LayoutResponse>('/api/analyze-layouts', visionBody)
-        : Promise.resolve(null),
-    ])
-
-    if (scriptResult.status === 'fulfilled' && scriptResult.value) {
-      setAnalysisResult(scriptResult.value)
-    } else if (scriptResult.status === 'rejected') {
-      setAnalysisError(
-        scriptResult.reason instanceof Error
-          ? scriptResult.reason.message
-          : String(scriptResult.reason),
+    try {
+      const result = await callJson<AnalysisResponse>(
+        '/api/analyze-script',
+        scriptBody,
       )
+      setAnalysisResult(result)
+    } catch (err) {
+      setAnalysisError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setAnalyzing(false)
     }
 
-    if (styleResult.status === 'fulfilled' && styleResult.value) {
-      setStyleResult(styleResult.value)
-    } else if (styleResult.status === 'rejected') {
-      setStyleError(
-        styleResult.reason instanceof Error
-          ? styleResult.reason.message
-          : String(styleResult.reason),
-      )
-    }
-
-    if (layoutResult.status === 'fulfilled' && layoutResult.value) {
-      setLayoutResult(layoutResult.value)
-    } else if (layoutResult.status === 'rejected') {
-      setLayoutError(
-        layoutResult.reason instanceof Error
-          ? layoutResult.reason.message
-          : String(layoutResult.reason),
-      )
-    }
-
-    setAnalyzing(false)
-    setAnalyzingStyle(false)
-    setAnalyzingLayouts(false)
+    // Vision analyses are cached on each reference. We don't re-run them
+    // here — the per-reference state already has them (or will, when
+    // they finish). The right column reads from the references directly
+    // for display; the legacy styleResult / layoutResult state slots
+    // will be wired to merged data in slice 2 when synthesis lands.
+    setLayoutsSamplingInfo(null)
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -518,7 +745,11 @@ export default function TestFunnelPage() {
             <div className="space-y-3">
               <SectionHeader
                 label="References"
-                badge={references.length > 0 ? `${references.length}` : null}
+                badge={
+                  references.length > 0
+                    ? `${references.length} / ${MAX_REFERENCES}`
+                    : null
+                }
               />
 
               <div className="flex gap-2">
@@ -530,18 +761,28 @@ export default function TestFunnelPage() {
                     if (
                       e.key === 'Enter' &&
                       !fetchingRef &&
-                      referenceUrl.trim()
+                      referenceUrl.trim() &&
+                      references.length < MAX_REFERENCES
                     ) {
                       fetchReference()
                     }
                   }}
-                  placeholder="https://www.instagram.com/p/..."
-                  className="flex-1 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+                  placeholder={
+                    references.length >= MAX_REFERENCES
+                      ? `Reference cap reached (${MAX_REFERENCES})`
+                      : 'https://www.instagram.com/p/...'
+                  }
+                  disabled={references.length >= MAX_REFERENCES}
+                  className="flex-1 rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
                 />
                 <button
                   type="button"
                   onClick={fetchReference}
-                  disabled={fetchingRef || !referenceUrl.trim()}
+                  disabled={
+                    fetchingRef ||
+                    !referenceUrl.trim() ||
+                    references.length >= MAX_REFERENCES
+                  }
                   className="rounded-md border border-neutral-700 bg-neutral-800 px-4 py-2 text-sm text-neutral-100 transition hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {fetchingRef ? 'Fetching…' : 'Add'}
@@ -567,6 +808,7 @@ export default function TestFunnelPage() {
                       key={ref.id}
                       reference={ref}
                       onRemove={removeReference}
+                      onRetryAnalysis={retryReferenceAnalysis}
                     />
                   ))}
                 </div>
@@ -646,6 +888,12 @@ export default function TestFunnelPage() {
             {analyzingLayouts && (
               <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 text-sm text-neutral-400">
                 Gemini extracting layout templates…
+                {layoutsSamplingInfo && (
+                  <span className="ml-2 text-xs text-neutral-500">
+                    (analyzing {layoutsSamplingInfo.analyzed} of{' '}
+                    {layoutsSamplingInfo.total} slides)
+                  </span>
+                )}
               </div>
             )}
             {layoutError && (
@@ -653,7 +901,9 @@ export default function TestFunnelPage() {
                 <strong>Layout analysis failed:</strong> {layoutError}
               </div>
             )}
-            {layoutResult && <LayoutSpecCard data={layoutResult} />}
+            {layoutResult && (
+              <LayoutSpecCard data={layoutResult} sampling={layoutsSamplingInfo} />
+            )}
 
             {/* Script analysis result */}
             <AnalysisPanel
@@ -744,10 +994,18 @@ function SectionHeader({
 function ReferenceCard({
   reference,
   onRemove,
+  onRetryAnalysis,
 }: {
   reference: Reference
   onRemove: (id: string) => void
+  onRetryAnalysis: (id: string, task: 'style' | 'layouts') => void
 }) {
+  const styleStatus = reference.styleAnalysis.status
+  const layoutsStatus = reference.layoutsAnalysis.status
+  const anyRunning = styleStatus === 'running' || layoutsStatus === 'running'
+  const anyPending = styleStatus === 'pending' || layoutsStatus === 'pending'
+  const showShimmer = anyRunning || anyPending
+
   return (
     <article className="rounded-lg border border-neutral-800 bg-neutral-900 p-3">
       <div className="mb-2 flex items-start justify-between gap-3">
@@ -771,24 +1029,194 @@ function ReferenceCard({
           <CloseIcon />
         </button>
       </div>
-      <div className="grid grid-cols-4 gap-1">
-        {reference.images.slice(0, 4).map((img) => (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            key={img.order}
-            src={img.src}
-            alt=""
-            className="aspect-square w-full rounded object-cover"
-            loading="lazy"
-          />
-        ))}
-      </div>
-      {reference.images.length > 4 && (
-        <div className="mt-1 text-center text-xs text-neutral-500">
-          +{reference.images.length - 4} more
-        </div>
+
+      {showShimmer ? (
+        <ShimmerCard
+          styleStatus={styleStatus}
+          layoutsStatus={layoutsStatus}
+        />
+      ) : (
+        <>
+          <div className="grid grid-cols-4 gap-1">
+            {reference.images.slice(0, 4).map((img) => (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                key={img.order}
+                src={img.src}
+                alt=""
+                className="aspect-square w-full rounded object-cover"
+                loading="lazy"
+              />
+            ))}
+          </div>
+          {reference.images.length > 4 && (
+            <div className="mt-1 text-center text-xs text-neutral-500">
+              +{reference.images.length - 4} more
+            </div>
+          )}
+        </>
       )}
+
+      {/* Status row beneath the thumbnails — always visible once
+          analysis has settled at least one task. Shows checkmarks for
+          done tasks and retry buttons for errors. */}
+      <div className="mt-2 flex items-center gap-3 text-[11px]">
+        <AnalysisStatusPill
+          label="Style"
+          status={styleStatus}
+          onRetry={() => onRetryAnalysis(reference.id, 'style')}
+          message={
+            reference.styleAnalysis.status === 'error'
+              ? reference.styleAnalysis.message
+              : undefined
+          }
+        />
+        <AnalysisStatusPill
+          label="Layouts"
+          status={layoutsStatus}
+          onRetry={() => onRetryAnalysis(reference.id, 'layouts')}
+          message={
+            reference.layoutsAnalysis.status === 'error'
+              ? reference.layoutsAnalysis.message
+              : undefined
+          }
+        />
+      </div>
     </article>
+  )
+}
+
+function AnalysisStatusPill({
+  label,
+  status,
+  onRetry,
+  message,
+}: {
+  label: string
+  status: 'pending' | 'running' | 'done' | 'error'
+  onRetry: () => void
+  message?: string
+}) {
+  if (status === 'done') {
+    return (
+      <span className="inline-flex items-center gap-1 text-emerald-400">
+        <span aria-hidden>✓</span>
+        <span>{label}</span>
+      </span>
+    )
+  }
+  if (status === 'error') {
+    return (
+      <button
+        type="button"
+        onClick={onRetry}
+        title={message}
+        className="inline-flex items-center gap-1 text-rose-400 transition hover:text-rose-300"
+      >
+        <span aria-hidden>⟲</span>
+        <span>
+          {label} failed — <span className="underline">retry</span>
+        </span>
+      </button>
+    )
+  }
+  // pending / running
+  return (
+    <span className="inline-flex items-center gap-1 text-neutral-400">
+      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-neutral-500" />
+      <span>{label}…</span>
+    </span>
+  )
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Subcomponent — ShimmerCard
+//
+// Renders a halftone dot grid with a diagonal opacity wave animation
+// while one or both vision tasks are running. Phase text rotates
+// through the actual task states for honest progress feedback (rather
+// than poetic-but-fake phrases).
+// ────────────────────────────────────────────────────────────────────────
+
+const SHIMMER_COLS = 24
+const SHIMMER_ROWS = 16
+
+function ShimmerCard({
+  styleStatus,
+  layoutsStatus,
+}: {
+  styleStatus: 'pending' | 'running' | 'done' | 'error'
+  layoutsStatus: 'pending' | 'running' | 'done' | 'error'
+}) {
+  // Pick a phase label that reflects what's actually happening.
+  // Cycles every 1.6s through whichever tasks are currently in flight,
+  // so the user can see the system advancing without us inventing
+  // fictitious stage names.
+  const phases = useMemo(() => {
+    const list: string[] = []
+    if (styleStatus === 'running' || styleStatus === 'pending') {
+      list.push('Reading visual style', 'Sampling colors', 'Identifying fonts')
+    }
+    if (layoutsStatus === 'running' || layoutsStatus === 'pending') {
+      list.push('Mapping layouts', 'Tracing composition', 'Finding patterns')
+    }
+    return list.length > 0 ? list : ['Analyzing']
+  }, [styleStatus, layoutsStatus])
+
+  const [phaseIdx, setPhaseIdx] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => {
+      setPhaseIdx((i) => (i + 1) % phases.length)
+    }, 1_600)
+    return () => clearInterval(id)
+  }, [phases.length])
+
+  return (
+    <div className="relative overflow-hidden rounded-md bg-neutral-950 px-3 pb-3 pt-2.5">
+      <div className="relative z-10 text-[11px] font-medium text-neutral-200">
+        {phases[phaseIdx] ?? 'Analyzing'}…
+      </div>
+      <div
+        className="mt-2 grid gap-[3px]"
+        style={{
+          gridTemplateColumns: `repeat(${SHIMMER_COLS}, 1fr)`,
+          gridTemplateRows: `repeat(${SHIMMER_ROWS}, 1fr)`,
+          aspectRatio: `${SHIMMER_COLS} / ${SHIMMER_ROWS}`,
+        }}
+      >
+        {Array.from({ length: SHIMMER_COLS * SHIMMER_ROWS }).map((_, i) => {
+          const row = Math.floor(i / SHIMMER_COLS)
+          const col = i % SHIMMER_COLS
+          // Delay each dot's animation based on its diagonal position
+          // so the wave moves across the grid from top-left to bottom-right.
+          const delay = (col + row) * 0.06
+          return (
+            <span
+              key={i}
+              className="shimmer-dot block aspect-square rounded-full bg-neutral-400"
+              style={{ animationDelay: `${delay}s` }}
+            />
+          )
+        })}
+      </div>
+      <style jsx>{`
+        @keyframes shimmer-pulse {
+          0%,
+          100% {
+            opacity: 0.12;
+            transform: scale(0.85);
+          }
+          50% {
+            opacity: 0.55;
+            transform: scale(1);
+          }
+        }
+        .shimmer-dot {
+          animation: shimmer-pulse 2.4s ease-in-out infinite;
+          will-change: opacity, transform;
+        }
+      `}</style>
+    </div>
   )
 }
 
@@ -1172,7 +1600,13 @@ function StyleSpecCard({ data }: { data: StyleResponse }) {
 // appear in the header / footer of the card.
 // ────────────────────────────────────────────────────────────────────────
 
-function LayoutSpecCard({ data }: { data: LayoutResponse }) {
+function LayoutSpecCard({
+  data,
+  sampling,
+}: {
+  data: LayoutResponse
+  sampling: { analyzed: number; total: number } | null
+}) {
   const { layoutSpec, usage } = data
 
   const consistencyColor: Record<typeof layoutSpec.consistency, string> = {
@@ -1188,8 +1622,16 @@ function LayoutSpecCard({ data }: { data: LayoutResponse }) {
           Layout spec
         </h3>
         <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-[10px] text-neutral-400">
-          Gemini
+          {usage.provider}
         </span>
+        {sampling && (
+          <span
+            className="rounded-full bg-amber-900/40 px-2 py-0.5 text-[10px] text-amber-300"
+            title={`Capped at ${MAX_SLIDES_PER_REF_FOR_LAYOUTS} slides per reference and ${MAX_TOTAL_SLIDES_FOR_LAYOUTS} total to fit in the per-call budget.`}
+          >
+            sampled {sampling.analyzed}/{sampling.total}
+          </span>
+        )}
         <span className="ml-auto flex items-center gap-3 text-[10px] text-neutral-500">
           <span>
             Consistency:{' '}

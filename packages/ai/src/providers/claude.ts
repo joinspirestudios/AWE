@@ -45,23 +45,46 @@ import type {
   ProviderName,
 } from '../types'
 
-/** Default model. Sonnet is the right balance of cost and quality for analysis tasks. */
+/** Default model. Sonnet is the right balance of cost and quality for reasoning tasks. */
 const DEFAULT_MODEL = 'claude-sonnet-4-6'
+
+type TaskModelOverrides = Partial<{
+  analyzeScript: string
+  analyzeReference: string
+  analyzeLayouts: string
+  identifyFont: string
+  chat: string
+}>
 
 export interface ClaudeProviderOptions {
   apiKey: string
-  /** Override the model for all tasks. */
+  /** Default model for tasks without a specific override. */
   defaultModel?: string
+  /**
+   * Per-task model overrides. The mechanism exists for future routing
+   * needs (e.g. sending lighter sub-tasks to Haiku), but we deliberately
+   * leave it empty by default — the fallback path uses the full-quality
+   * model so it never sacrifices output quality just to fit under a
+   * timeout. The timeout is sized for Sonnet in the router instead.
+   */
+  taskModels?: TaskModelOverrides
 }
 
 export class ClaudeProvider implements AIProvider {
   readonly name: ProviderName = 'claude'
   private client: Anthropic
-  private model: string
+  private defaultModel: string
+  private taskModels: TaskModelOverrides
 
   constructor(opts: ClaudeProviderOptions) {
     this.client = new Anthropic({ apiKey: opts.apiKey })
-    this.model = opts.defaultModel ?? DEFAULT_MODEL
+    this.defaultModel = opts.defaultModel ?? DEFAULT_MODEL
+    this.taskModels = opts.taskModels ?? {}
+  }
+
+  /** Resolve which model to use for a given task. */
+  private modelFor(task: keyof TaskModelOverrides): string {
+    return this.taskModels[task] ?? this.defaultModel
   }
 
   async analyzeScript(
@@ -80,7 +103,7 @@ export class ClaudeProvider implements AIProvider {
 
     const response = await this.client.messages.create(
       {
-        model: this.model,
+        model: this.modelFor('analyzeScript'),
         // 16K covers even 20-slide carousels with detailed bodies. Sonnet
         // 4.6 supports up to 64K output tokens; we cap here to prevent
         // pathologically long responses without truncating real ones.
@@ -179,13 +202,13 @@ export class ClaudeProvider implements AIProvider {
       data: parsed.data,
       usage: {
         provider: 'claude',
-        model: this.model,
+        model: this.modelFor('analyzeScript'),
         durationMs,
         inputTokens,
         outputTokens,
         cachedInputTokens: cacheReadTokens,
         estimatedCostUsd: estimateClaudeCost(
-          this.model,
+          this.modelFor('analyzeScript'),
           inputTokens,
           outputTokens,
           cacheReadTokens,
@@ -257,7 +280,7 @@ export class ClaudeProvider implements AIProvider {
 
     const response = await this.client.messages.create(
       {
-        model: this.model,
+        model: this.modelFor('analyzeReference'),
         max_tokens: 4_096,
         system: [
           {
@@ -321,13 +344,13 @@ export class ClaudeProvider implements AIProvider {
       data: parsed.data,
       usage: {
         provider: 'claude',
-        model: this.model,
+        model: this.modelFor('analyzeReference'),
         durationMs,
         inputTokens,
         outputTokens,
         cachedInputTokens: cacheReadTokens,
         estimatedCostUsd: estimateClaudeCost(
-          this.model,
+          this.modelFor('analyzeReference'),
           inputTokens,
           outputTokens,
           cacheReadTokens,
@@ -399,7 +422,7 @@ export class ClaudeProvider implements AIProvider {
     // easily need 12-15k output tokens. 16384 leaves comfortable headroom.
     const response = await this.client.messages.create(
       {
-        model: this.model,
+        model: this.modelFor('analyzeLayouts'),
         max_tokens: 16_384,
         system: [
           {
@@ -463,13 +486,13 @@ export class ClaudeProvider implements AIProvider {
       data: parsed.data,
       usage: {
         provider: 'claude',
-        model: this.model,
+        model: this.modelFor('analyzeLayouts'),
         durationMs,
         inputTokens,
         outputTokens,
         cachedInputTokens: cacheReadTokens,
         estimatedCostUsd: estimateClaudeCost(
-          this.model,
+          this.modelFor('analyzeLayouts'),
           inputTokens,
           outputTokens,
           cacheReadTokens,

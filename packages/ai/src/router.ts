@@ -47,11 +47,21 @@ export const DEFAULT_ROUTES: Readonly<Record<TaskName, readonly ProviderName[]>>
 }
 
 /**
- * Per-attempt timeout for non-streaming tasks. Sized so a primary that
- * hangs to the wire still leaves room for one fallback within Vercel's
- * 60s Hobby-plan function ceiling (28s + 28s + overhead < 60s).
+ * Per-attempt timeouts for non-streaming tasks. Asymmetric on purpose:
+ *
+ *   - PRIMARY_ATTEMPT_TIMEOUT (20s) — Gemini Flash routinely finishes in
+ *     14-18s when it's healthy. If it's going to take longer, it's
+ *     almost certainly hung or overloaded and we want to fall over fast.
+ *   - FALLBACK_ATTEMPT_TIMEOUT (35s) — Claude Sonnet vision needs 25-30s
+ *     for 8 images of structured tool-calling output. 35s gives it real
+ *     room to finish without losing quality (vs swapping in Haiku).
+ *
+ * Total worst case: 20s + 35s = 55s, leaving ~5s safety margin under
+ * Vercel's 60s Hobby-plan function ceiling. The fast-fail case (primary
+ * 503s in <1s) gives the fallback the full 35s with budget to spare.
  */
-const PER_ATTEMPT_TIMEOUT_MS = 28_000
+const PRIMARY_ATTEMPT_TIMEOUT_MS = 20_000
+const FALLBACK_ATTEMPT_TIMEOUT_MS = 35_000
 
 export interface RouterOptions {
   providers: AIProvider[]
@@ -93,6 +103,7 @@ export class AIRouter {
   ): Promise<TaskResult<T>> {
     const chain = this.routes[task]
     let lastError: Error | undefined
+    let attemptIndex = 0 // Logical position; incremented only on real attempts
 
     for (const providerName of chain) {
       const provider = this.providers.get(providerName)
@@ -101,6 +112,15 @@ export class AIRouter {
       const method = (provider as unknown as Record<string, unknown>)[task]
       if (typeof method !== 'function') continue
 
+      // Asymmetric per-attempt timeouts: the primary attempt gets a
+      // tight cap (it's fast or it's broken), the fallback gets a
+      // generous cap (slower but better quality). Sized to fit two
+      // attempts under Vercel's 60s function ceiling.
+      const attemptTimeoutMs =
+        attemptIndex === 0
+          ? PRIMARY_ATTEMPT_TIMEOUT_MS
+          : FALLBACK_ATTEMPT_TIMEOUT_MS
+
       // Per-attempt AbortController with a hard timeout. Linked to the
       // caller's signal (if any) so external aborts still propagate.
       const attemptController = new AbortController()
@@ -108,7 +128,7 @@ export class AIRouter {
       signal?.addEventListener('abort', onParentAbort)
       const timeoutId = setTimeout(
         () => attemptController.abort(),
-        PER_ATTEMPT_TIMEOUT_MS,
+        attemptTimeoutMs,
       )
 
       try {
@@ -126,13 +146,13 @@ export class AIRouter {
       } catch (err) {
         const error = err as Error
         // If our internal timeout fired (and the caller didn't abort),
-        // surface a clean per-provider timeout error so logs show why
-        // we fell over.
+        // surface a clean per-provider timeout error so logs show which
+        // cap (primary vs fallback) was breached.
         const isOurTimeout =
           attemptController.signal.aborted && !signal?.aborted
         const wrappedError = isOurTimeout
           ? new Error(
-              `Provider ${providerName} exceeded ${PER_ATTEMPT_TIMEOUT_MS}ms timeout (${error.message})`,
+              `Provider ${providerName} exceeded ${attemptTimeoutMs}ms timeout (${error.message})`,
             )
           : error
         lastError = wrappedError
@@ -142,6 +162,7 @@ export class AIRouter {
       } finally {
         clearTimeout(timeoutId)
         signal?.removeEventListener('abort', onParentAbort)
+        attemptIndex++
       }
     }
 

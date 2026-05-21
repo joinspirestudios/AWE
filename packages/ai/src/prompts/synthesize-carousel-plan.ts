@@ -285,25 +285,39 @@ export function buildSynthesizeCarouselPlanUserMessage(input: {
     lines.push(`## ${label} (refId: ${r.refId})`)
     lines.push('')
 
-    // Style summary — keep it compact
+    // Style summary — keep it compact. Maps to StyleSpecSchema in @app/scene.
     lines.push('### Style')
-    lines.push(`Tone: ${r.style.tone}`)
-    if (r.style.colors.brand.length > 0) {
-      lines.push(`Brand colors: ${r.style.colors.brand.join(', ')}`)
+    if (r.style.colors.primary.length > 0) {
+      lines.push(`Primary colors: ${r.style.colors.primary.join(', ')}`)
     }
-    if (r.style.colors.accent.length > 0) {
-      lines.push(`Accent colors: ${r.style.colors.accent.join(', ')}`)
+    if (r.style.colors.accents.length > 0) {
+      lines.push(`Accent colors: ${r.style.colors.accents.join(', ')}`)
     }
+    // Typography: surface the category fields plus the top font guess
+    // for each role when one was identified. Font names are stronger
+    // signal than "sans" / "serif" alone — synthesis should be able to
+    // call out specific candidates when they recur across references.
+    const headlineFont = r.style.typography.headlineFontGuesses[0]
+    const bodyFont = r.style.typography.bodyFontGuesses[0]
+    const headlineDesc = headlineFont
+      ? `${r.style.typography.headlineStyle} (${headlineFont.family})`
+      : r.style.typography.headlineStyle
+    const bodyDesc = bodyFont
+      ? `${r.style.typography.bodyStyle} (${bodyFont.family})`
+      : r.style.typography.bodyStyle
     lines.push(
-      `Typography: ${r.style.typography.headline.style} headline / ${r.style.typography.body.style} body`,
+      `Typography: ${headlineDesc} headline / ${bodyDesc} body, ${r.style.typography.headlineWeight} weight, ${r.style.typography.hierarchy} hierarchy`,
     )
     if (r.style.motifs.length > 0) {
       lines.push(`Motifs: ${r.style.motifs.join(', ')}`)
     }
-    lines.push(`Layout grammar: ${r.style.layout.alignment}, ${r.style.layout.grid} grid`)
-    if (r.style.slidePattern) {
-      lines.push(`Slide pattern: ${r.style.slidePattern}`)
-    }
+    lines.push(
+      `Layout grammar: ${r.style.layout.alignment}-aligned, ${r.style.layout.grid} grid${r.style.layout.fullBleed ? ', full-bleed' : ''}`,
+    )
+    lines.push(
+      `Background: ${r.style.background.type}, ${r.style.background.mood} mood`,
+    )
+    lines.push(`Slide pattern: ${r.style.slidePattern}`)
 
     // Layouts summary — per-slide compositions, then patterns
     lines.push('')

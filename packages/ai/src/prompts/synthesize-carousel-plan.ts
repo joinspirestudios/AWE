@@ -242,8 +242,20 @@ export function buildSynthesizeCarouselPlanUserMessage(input: {
     layouts: LayoutSpec
   }>
   platform?: { platform: string; format: string }
+  /** Zero-indexed slide positions to regenerate. Empty/absent = full plan. */
+  slidesToSynthesize?: number[]
+  /** Required when slidesToSynthesize is non-empty. */
+  existingPlan?: CarouselPlan
 }): string {
   const lines: string[] = []
+
+  // Detect partial mode early — only treat as partial if we have BOTH
+  // the slide list AND an existing plan to anchor consistency against.
+  const isPartial =
+    Array.isArray(input.slidesToSynthesize) &&
+    input.slidesToSynthesize.length > 0 &&
+    input.existingPlan !== undefined &&
+    input.existingPlan.slides.length > 0
 
   if (input.platform) {
     lines.push(
@@ -345,9 +357,49 @@ export function buildSynthesizeCarouselPlanUserMessage(input: {
 
   lines.push('---')
   lines.push('')
-  lines.push(
-    `Now produce the CarouselPlan: one SlidePlan per script slide (${input.script.recommendedSlideCount} total), in slideIndex order. Call submit_carousel_plan with the result.`,
-  )
+
+  if (isPartial && input.existingPlan && input.slidesToSynthesize) {
+    // Partial mode: ground the regeneration in the existing plan so the
+    // model maintains the visual arc, composition vocabulary, and
+    // citation style the user already accepted for the other slides.
+    lines.push('# Existing plan (regenerate only specified slides)')
+    lines.push('')
+    if (input.existingPlan.overview) {
+      lines.push(`Overview: ${input.existingPlan.overview}`)
+      lines.push('')
+    }
+    lines.push('Current plan slides:')
+    for (const slide of input.existingPlan.slides) {
+      const els = slide.elements
+        .map(
+          (e) =>
+            `${e.type}@${e.region}/${e.size}${e.role ? `(${e.role})` : ''}`,
+        )
+        .join(', ')
+      const draws =
+        slide.drawsFrom.length > 0
+          ? ` [draws: ${slide.drawsFrom.map((d) => `${d.refId}${d.slideIndex !== undefined ? `#${d.slideIndex}` : ''}/${d.what}`).join(', ')}]`
+          : ''
+      lines.push(
+        `  - Slide ${slide.slideIndex} (${slide.purpose}): ${slide.composition}${els ? ` — [${els}]` : ''}${draws}`,
+      )
+    }
+    lines.push('')
+    lines.push(
+      `Regenerate ONLY these slides: ${input.slidesToSynthesize.sort((a, b) => a - b).join(', ')}.`,
+    )
+    lines.push(
+      `Return a CarouselPlan containing exactly those SlidePlans, in slideIndex order. Do NOT include unchanged slides. Omit the top-level overview field. The script content for the affected slide(s) may have changed — read the script analysis above carefully; respect the new headline/body/emphasis exactly.`,
+    )
+    lines.push(
+      `Keep the regenerated slides consistent with the rest of the existing plan: same composition vocabulary, same drawsFrom citation style, same level of rationale detail. Don't redesign the whole carousel for one slide.`,
+    )
+    lines.push('Call submit_carousel_plan with the partial result.')
+  } else {
+    lines.push(
+      `Now produce the CarouselPlan: one SlidePlan per script slide (${input.script.recommendedSlideCount} total), in slideIndex order. Call submit_carousel_plan with the result.`,
+    )
+  }
 
   return lines.join('\n')
 }

@@ -522,6 +522,8 @@ export class ClaudeProvider implements AIProvider {
       platform: req.platform
         ? { platform: req.platform.platform, format: req.platform.format }
         : undefined,
+      slidesToSynthesize: req.slidesToSynthesize,
+      existingPlan: req.existingPlan,
     })
 
     // Build Claude's tool from the canonical JSON Schema. The schema is

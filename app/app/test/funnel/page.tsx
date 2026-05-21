@@ -371,6 +371,26 @@ export default function TestFunnelPage() {
   const [planError, setPlanError] = useState<string | null>(null)
   const [planResult, setPlanResult] = useState<PlanResponse | null>(null)
 
+  /**
+   * Slide indices whose Analysis tab content has been edited since the
+   * last successful synthesis. Drives the "stale" badges on the
+   * Direction tab strip and on individual SlidePlanCards. Cleared when
+   * a full synthesis completes; per-slide retries clear only the
+   * retried index.
+   */
+  const [staleSlides, setStaleSlides] = useState<Set<number>>(new Set())
+
+  /**
+   * Single in-flight slide retry. Lets the UI show a loading state on
+   * just that card while other cards stay interactive. We allow only
+   * one retry at a time to avoid race conditions on planResult merges.
+   */
+  const [retryingSlide, setRetryingSlide] = useState<number | null>(null)
+  const [retryError, setRetryError] = useState<{
+    slideIndex: number
+    message: string
+  } | null>(null)
+
   // Right-column tab. 'direction' is the default — it's the actual
   // output of the funnel. 'analysis' is the auditable view showing what
   // the system saw in the script and references.
@@ -448,6 +468,9 @@ export default function TestFunnelPage() {
       // Fire eagerly — don't await. Each call updates the reference's
       // analysis state via setReferences when it settles.
       void runReferenceAnalysis(ref)
+      // Adding a reference changes the synthesis context for every
+      // slide — mark them all stale if a plan already exists.
+      markAllSlidesStale()
     } catch (err) {
       setRefError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
@@ -457,6 +480,9 @@ export default function TestFunnelPage() {
 
   function removeReference(id: string) {
     setReferences((prev) => prev.filter((r) => r.id !== id))
+    // Same reasoning as add: removing a reference shifts synthesis
+    // context for the whole plan.
+    markAllSlidesStale()
   }
 
   /**
@@ -754,10 +780,101 @@ export default function TestFunnelPage() {
     try {
       const result = await callJson<PlanResponse>('/api/synthesize-plan', body)
       setPlanResult(result)
+      // Full synthesis means every slide is fresh — clear all stale marks
+      // and any prior retry error.
+      setStaleSlides(new Set())
+      setRetryError(null)
     } catch (err) {
       setPlanError(err instanceof Error ? err.message : String(err))
     } finally {
       setSynthesizing(false)
+    }
+  }
+
+  /**
+   * Re-synthesize a single slide while leaving the rest of the plan
+   * intact. The server sees the existing plan as consistency context so
+   * the new slide stays coherent with the visual arc. Response is a
+   * partial CarouselPlan with just that one slide; we merge it in by
+   * slideIndex.
+   */
+  async function retrySlideSynthesis(slideIndex: number) {
+    if (!analysisResult || !planResult) return
+    if (retryingSlide !== null) return // one retry at a time
+
+    const usableRefs = references.filter(
+      (r) =>
+        r.styleAnalysis.status === 'done' &&
+        r.layoutsAnalysis.status === 'done',
+    )
+    if (usableRefs.length === 0) {
+      setRetryError({
+        slideIndex,
+        message:
+          'No references finished analysis successfully. Retry the failed ones above first.',
+      })
+      return
+    }
+
+    setRetryingSlide(slideIndex)
+    setRetryError(null)
+
+    const body = {
+      script: analysisResult.analysis,
+      references: usableRefs.map((r) => ({
+        refId: r.id,
+        ownerUsername: r.ownerUsername,
+        style: (r.styleAnalysis as { status: 'done'; data: StyleSpec }).data,
+        layouts: (r.layoutsAnalysis as { status: 'done'; data: LayoutSpec })
+          .data,
+      })),
+      slidesToSynthesize: [slideIndex],
+      existingPlan: planResult.plan,
+    }
+
+    try {
+      const result = await callJson<PlanResponse>('/api/synthesize-plan', body)
+      // Merge: replace the slide at slideIndex with the new one from
+      // the partial response. Preserve overview and any other slides.
+      const newSlide = result.plan.slides.find(
+        (s) => s.slideIndex === slideIndex,
+      )
+      if (!newSlide) {
+        setRetryError({
+          slideIndex,
+          message: `Server returned a plan but no slide ${slideIndex + 1} entry. Try a full Analyze instead.`,
+        })
+        return
+      }
+      setPlanResult((prev) => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          plan: {
+            ...prev.plan,
+            slides: prev.plan.slides.map((s) =>
+              s.slideIndex === slideIndex ? newSlide : s,
+            ),
+          },
+          // Track usage for the partial call too. We replace rather than
+          // accumulate because the funnel UI only shows the latest call;
+          // total cost lives in the Vercel logs.
+          usage: result.usage,
+        }
+      })
+      // Clear staleness for just this slide.
+      setStaleSlides((prev) => {
+        const next = new Set(prev)
+        next.delete(slideIndex)
+        return next
+      })
+    } catch (err) {
+      setRetryError({
+        slideIndex,
+        message: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      setRetryingSlide(null)
     }
   }
 
@@ -795,6 +912,9 @@ export default function TestFunnelPage() {
     setAnalysisResult((prev) =>
       prev ? { ...prev, analysis: { ...prev.analysis, ...updates } } : prev,
     )
+    // Carousel-level fields (niche, tone, audience) feed into the
+    // synthesis prompt for every slide — mark them all stale.
+    markAllSlidesStale()
   }
 
   function updateSlide(index: number, updates: Partial<SlideOutput>) {
@@ -810,6 +930,7 @@ export default function TestFunnelPage() {
         },
       }
     })
+    setStaleSlides((prev) => new Set(prev).add(index))
   }
 
   function deleteSlide(index: number) {
@@ -825,6 +946,18 @@ export default function TestFunnelPage() {
         },
       }
     })
+    // Deleting shifts every subsequent slide's index — the existing
+    // plan can no longer be aligned 1:1. Mark all stale; a full
+    // re-synthesis is the only safe path.
+    markAllSlidesStale()
+  }
+
+  /** Mark every slide of the current plan as stale. */
+  function markAllSlidesStale() {
+    if (!planResult) return
+    setStaleSlides(
+      new Set(planResult.plan.slides.map((s) => s.slideIndex)),
+    )
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -1030,13 +1163,26 @@ export default function TestFunnelPage() {
                 label="Direction"
                 active={activeTab === 'direction'}
                 onClick={() => setActiveTab('direction')}
-                badge={planResult ? '✓' : null}
+                badge={
+                  // 'stale' wins over '✓' when any slide has been edited
+                  // since last synthesis. If we don't have a plan yet,
+                  // show nothing.
+                  planResult
+                    ? staleSlides.size > 0
+                      ? 'stale'
+                      : '✓'
+                    : null
+                }
+                badgeTone={
+                  planResult && staleSlides.size > 0 ? 'warning' : 'success'
+                }
               />
               <TabButton
                 label="Analysis"
                 active={activeTab === 'analysis'}
                 onClick={() => setActiveTab('analysis')}
                 badge={analysisResult ? '✓' : null}
+                badgeTone="success"
               />
             </div>
 
@@ -1047,6 +1193,10 @@ export default function TestFunnelPage() {
                 plan={planResult?.plan ?? null}
                 references={references}
                 analysisResult={analysisResult}
+                staleSlides={staleSlides}
+                retryingSlide={retryingSlide}
+                retryError={retryError}
+                onRetrySlide={retrySlideSynthesis}
               />
             ) : (
               <>
@@ -1386,11 +1536,13 @@ function TabButton({
   active,
   onClick,
   badge,
+  badgeTone = 'success',
 }: {
   label: string
   active: boolean
   onClick: () => void
   badge: string | null
+  badgeTone?: 'success' | 'warning'
 }) {
   return (
     <button
@@ -1404,7 +1556,11 @@ function TabButton({
     >
       {label}
       {badge && (
-        <span className="ml-1.5 inline-flex items-center text-[10px] text-emerald-400">
+        <span
+          className={`ml-1.5 inline-flex items-center text-[10px] ${
+            badgeTone === 'warning' ? 'text-amber-400' : 'text-emerald-400'
+          }`}
+        >
           {badge}
         </span>
       )}
@@ -1426,12 +1582,20 @@ function DirectionPanel({
   plan,
   references,
   analysisResult,
+  staleSlides,
+  retryingSlide,
+  retryError,
+  onRetrySlide,
 }: {
   synthesizing: boolean
   error: string | null
   plan: CarouselPlan | null
   references: Reference[]
   analysisResult: AnalysisResponse | null
+  staleSlides: Set<number>
+  retryingSlide: number | null
+  retryError: { slideIndex: number; message: string } | null
+  onRetrySlide: (slideIndex: number) => void
 }) {
   if (synthesizing) {
     return (
@@ -1482,6 +1646,17 @@ function DirectionPanel({
 
   return (
     <div className="space-y-4">
+      {/* Global stale banner — only shown when something has changed
+          since the last full synthesis. Per-slide retry buttons are
+          visible inline below; this banner just orients the user. */}
+      {staleSlides.size > 0 && (
+        <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-4 py-3 text-xs text-amber-200">
+          {staleSlides.size === plan.slides.length
+            ? 'All slides are stale — Analysis changed since the last synthesis. Re-Analyze for a fresh full plan, or use the retry button on individual slides.'
+            : `${staleSlides.size} slide${staleSlides.size === 1 ? '' : 's'} stale since the last synthesis. Use the retry button on each stale slide to refresh just that one.`}
+        </div>
+      )}
+
       {plan.overview && (
         <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
           <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
@@ -1505,6 +1680,18 @@ function DirectionPanel({
               slidePlan={slidePlan}
               scriptHeadline={scriptSlide?.headline}
               refLabel={refLabel}
+              isStale={staleSlides.has(slidePlan.slideIndex)}
+              isRetrying={retryingSlide === slidePlan.slideIndex}
+              isRetryDisabled={
+                retryingSlide !== null &&
+                retryingSlide !== slidePlan.slideIndex
+              }
+              retryErrorMessage={
+                retryError?.slideIndex === slidePlan.slideIndex
+                  ? retryError.message
+                  : null
+              }
+              onRetry={() => onRetrySlide(slidePlan.slideIndex)}
             />
           )
         })}
@@ -1524,53 +1711,99 @@ function SlidePlanCard({
   slidePlan,
   scriptHeadline,
   refLabel,
+  isStale,
+  isRetrying,
+  isRetryDisabled,
+  retryErrorMessage,
+  onRetry,
 }: {
   slidePlan: SlidePlan
   scriptHeadline: string | undefined
   refLabel: (refId: string) => string
+  isStale: boolean
+  isRetrying: boolean
+  isRetryDisabled: boolean
+  retryErrorMessage: string | null
+  onRetry: () => void
 }) {
+  // Border tint reflects state: amber for stale, default otherwise.
+  // While retrying, the card content dims and the button shows progress.
+  const borderClass = isStale
+    ? 'border-amber-900/60'
+    : 'border-neutral-800'
   return (
-    <article className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+    <article className={`rounded-lg border ${borderClass} bg-neutral-900 p-4`}>
       <header className="flex items-baseline justify-between gap-3">
-        <div className="flex items-baseline gap-2">
+        <div className="flex flex-wrap items-baseline gap-2">
           <span className="text-xs font-mono text-neutral-500">
             #{String(slidePlan.slideIndex + 1).padStart(2, '0')}
           </span>
           <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-neutral-300">
             {slidePlan.purpose}
           </span>
+          {isStale && (
+            <span className="rounded bg-amber-950/60 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
+              stale
+            </span>
+          )}
         </div>
-        <span className="text-[11px] text-neutral-500">
-          {slidePlan.composition}
-        </span>
+        <div className="flex items-baseline gap-3">
+          <span className="text-[11px] text-neutral-500">
+            {slidePlan.composition}
+          </span>
+          {isStale && (
+            <button
+              type="button"
+              onClick={onRetry}
+              disabled={isRetrying || isRetryDisabled}
+              className="rounded border border-amber-900/60 bg-amber-950/30 px-2 py-0.5 text-[10px] font-medium text-amber-200 transition hover:bg-amber-950/60 disabled:cursor-not-allowed disabled:opacity-50"
+              title={
+                isRetryDisabled
+                  ? 'Another slide is currently being retried'
+                  : 'Re-synthesize just this slide using the latest Analysis edits'
+              }
+            >
+              {isRetrying ? 'Retrying…' : '⟲ retry'}
+            </button>
+          )}
+        </div>
       </header>
 
-      {scriptHeadline && (
-        <p className="mt-2 text-sm font-medium text-neutral-100">
-          {scriptHeadline}
+      <div className={isRetrying ? 'opacity-40 transition-opacity' : ''}>
+        {scriptHeadline && (
+          <p className="mt-2 text-sm font-medium text-neutral-100">
+            {scriptHeadline}
+          </p>
+        )}
+
+        <LayoutBlueprintMini elements={slidePlan.elements} />
+
+        <p className="mt-3 text-xs leading-relaxed text-neutral-400">
+          {slidePlan.rationale}
         </p>
-      )}
 
-      <LayoutBlueprintMini elements={slidePlan.elements} />
+        {slidePlan.drawsFrom.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {slidePlan.drawsFrom.map((draw, i) => (
+              <span
+                key={`${draw.refId}-${i}`}
+                className="rounded-full border border-neutral-800 bg-neutral-950 px-2 py-0.5 text-[10px] text-neutral-400"
+                title={draw.what}
+              >
+                {refLabel(draw.refId)}
+                {typeof draw.slideIndex === 'number' &&
+                  ` · slide ${draw.slideIndex + 1}`}
+                <span className="ml-1 text-neutral-500">· {draw.what}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
 
-      <p className="mt-3 text-xs leading-relaxed text-neutral-400">
-        {slidePlan.rationale}
-      </p>
-
-      {slidePlan.drawsFrom.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {slidePlan.drawsFrom.map((draw, i) => (
-            <span
-              key={`${draw.refId}-${i}`}
-              className="rounded-full border border-neutral-800 bg-neutral-950 px-2 py-0.5 text-[10px] text-neutral-400"
-              title={draw.what}
-            >
-              {refLabel(draw.refId)}
-              {typeof draw.slideIndex === 'number' &&
-                ` · slide ${draw.slideIndex + 1}`}
-              <span className="ml-1 text-neutral-500">· {draw.what}</span>
-            </span>
-          ))}
+      {retryErrorMessage && !isRetrying && (
+        <div className="mt-3 rounded border border-red-900/60 bg-red-950/30 px-3 py-2 text-[11px] text-red-200">
+          <span className="font-medium">Retry failed:</span>{' '}
+          {retryErrorMessage}
         </div>
       )}
     </article>

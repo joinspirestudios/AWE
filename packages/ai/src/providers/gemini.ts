@@ -316,6 +316,8 @@ export class GeminiProvider implements AIProvider {
       platform: req.platform
         ? { platform: req.platform.platform, format: req.platform.format }
         : undefined,
+      slidesToSynthesize: req.slidesToSynthesize,
+      existingPlan: req.existingPlan,
     })
 
     const response = await this.client.models.generateContent({

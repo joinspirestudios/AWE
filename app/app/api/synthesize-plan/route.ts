@@ -26,6 +26,7 @@
 
 import { type NextRequest, NextResponse } from 'next/server'
 import {
+  CarouselPlanSchema,
   LayoutSpecSchema,
   PlatformFormatSchema,
   ScriptAnalysisSchema,
@@ -38,20 +39,43 @@ import { getRouter } from '@/lib/ai'
 export const runtime = 'nodejs'
 export const maxDuration = 180
 
-const RequestSchema = z.object({
-  script: ScriptAnalysisSchema,
-  references: z
-    .array(
-      z.object({
-        refId: z.string().min(1),
-        ownerUsername: z.string().optional(),
-        style: StyleSpecSchema,
-        layouts: LayoutSpecSchema,
-      }),
-    )
-    .max(8, 'Too many references; cap is 8'),
-  platform: PlatformFormatSchema.optional(),
-})
+const RequestSchema = z
+  .object({
+    script: ScriptAnalysisSchema,
+    references: z
+      .array(
+        z.object({
+          refId: z.string().min(1),
+          ownerUsername: z.string().optional(),
+          style: StyleSpecSchema,
+          layouts: LayoutSpecSchema,
+        }),
+      )
+      .max(8, 'Too many references; cap is 8'),
+    platform: PlatformFormatSchema.optional(),
+    /**
+     * Partial-mode: regenerate only these zero-indexed slides. When set
+     * (non-empty), `existingPlan` is required so the model has the rest
+     * of the carousel as consistency context.
+     */
+    slidesToSynthesize: z.array(z.number().int().min(0)).optional(),
+    existingPlan: CarouselPlanSchema.optional(),
+  })
+  .refine(
+    (val) => {
+      const wantPartial =
+        Array.isArray(val.slidesToSynthesize) &&
+        val.slidesToSynthesize.length > 0
+      // Either: both partial fields present, or neither.
+      if (wantPartial && !val.existingPlan) return false
+      return true
+    },
+    {
+      message:
+        'slidesToSynthesize requires existingPlan for consistency context',
+      path: ['existingPlan'],
+    },
+  )
 
 export async function POST(req: NextRequest) {
   let body: unknown

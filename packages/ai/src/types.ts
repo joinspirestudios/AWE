@@ -147,6 +147,22 @@ export interface SynthesizeCarouselPlanRequest {
     layouts: LayoutSpec
   }>
   platform?: PlatformFormat
+  /**
+   * Partial-mode signal: regenerate only the SlidePlans for these
+   * zero-indexed positions instead of producing a full plan. Used when
+   * the user edits one slide in the Analysis tab and wants Direction to
+   * refresh just that slide without disturbing the visual arc of the
+   * others. Omit or pass an empty array for full synthesis.
+   */
+  slidesToSynthesize?: number[]
+  /**
+   * Required when `slidesToSynthesize` is non-empty. The current plan
+   * gets included in the user prompt as consistency context so the
+   * model can produce a regenerated slide that still fits the
+   * established arc, references the same patterns where appropriate,
+   * etc. Ignored in full-synthesis mode.
+   */
+  existingPlan?: CarouselPlan
 }
 
 export type SynthesizeCarouselPlanResult = ProviderResult<CarouselPlan>

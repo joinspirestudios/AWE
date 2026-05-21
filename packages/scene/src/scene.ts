@@ -619,6 +619,76 @@ export const CarouselDocumentSchema = z.object({
 })
 
 // =========================================================================
+// CAROUSEL PLAN (output of synthesizeCarouselPlan task)
+//
+// The synthesis pass reads (ScriptAnalysis + N references' StyleSpec +
+// LayoutSpec) and produces a per-slide plan for the user's N script
+// slides. This is the "direction" output the user sees — the step that
+// turns "here's what I'm saying / here's what I like" into "here's what
+// each slide should look like."
+//
+// Distinct from LayoutSpec: LayoutSpec describes what we OBSERVED in
+// references. CarouselPlan prescribes what should be BUILT.
+// =========================================================================
+
+/**
+ * Per-slide plan for the user's script. Mirrors the reference vocabulary
+ * (composition labels, element types/regions/sizes) so the same renderer
+ * can drive both reference replication and synthesized output.
+ */
+export const SlidePlanSchema = z.object({
+  /** Zero-indexed position in the user's script slides. */
+  slideIndex: z.number().int().min(0),
+  /** Purpose from script analysis: hook / point / data / quote / etc. */
+  purpose: ScriptSlidePurposeSchema,
+  /**
+   * Composition pattern label. Same free-form vocabulary as
+   * SlideLayoutSchema.composition — "hero", "centered", "split",
+   * "overlay", "data-card", etc.
+   */
+  composition: z.string(),
+  /** Element placements for this slide, in visual reading order. */
+  elements: z.array(LayoutElementSchema).default([]),
+  /**
+   * Brief explanation of why this composition fits the slide's purpose
+   * and how it relates to the references. 1-2 sentences max.
+   */
+  rationale: z.string(),
+  /**
+   * Optional citations: which reference slides informed this plan.
+   * Empty when the synthesis is original or draws from general patterns
+   * rather than a specific reference slide.
+   */
+  drawsFrom: z
+    .array(
+      z.object({
+        /** Reference postId from the input references. */
+        refId: z.string(),
+        /** Optional reference slide index (zero-based). */
+        slideIndex: z.number().int().min(0).optional(),
+        /** What's being borrowed: "hero composition", "callout style", etc. */
+        what: z.string(),
+      }),
+    )
+    .default([]),
+})
+
+/**
+ * Full per-slide plan for the user's carousel. The slides array has
+ * one entry per slide in ScriptAnalysis (matching its recommendedSlideCount).
+ */
+export const CarouselPlanSchema = z.object({
+  /** Per-slide plans, ordered by slideIndex. */
+  slides: z.array(SlidePlanSchema).min(1),
+  /**
+   * Optional one-paragraph overview of the carousel's design direction —
+   * how the slides connect visually as a set, the dominant motif, the
+   * pacing. Distinct from per-slide rationale.
+   */
+  overview: z.string().optional(),
+})
+
+// =========================================================================
 // INFERRED TYPES
 // =========================================================================
 
@@ -644,6 +714,8 @@ export type SlideLayout = z.infer<typeof SlideLayoutSchema>
 export type LayoutSpec = z.infer<typeof LayoutSpecSchema>
 export type ScriptAnalysis = z.infer<typeof ScriptAnalysisSchema>
 export type ScriptSlidePurpose = z.infer<typeof ScriptSlidePurposeSchema>
+export type SlidePlan = z.infer<typeof SlidePlanSchema>
+export type CarouselPlan = z.infer<typeof CarouselPlanSchema>
 export type CarouselDocument = z.infer<typeof CarouselDocumentSchema>
 
 // =========================================================================

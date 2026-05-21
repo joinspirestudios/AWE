@@ -25,7 +25,7 @@ import {
 } from '@/lib/storage'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 180
 
 const RequestSchema = z.object({
   url: z.string().url('Must be a valid URL'),

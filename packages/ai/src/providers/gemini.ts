@@ -7,7 +7,11 @@
  */
 
 import { FunctionCallingConfigMode, GoogleGenAI } from '@google/genai'
-import { LayoutSpecSchema, StyleSpecSchema } from '@app/scene'
+import {
+  CarouselPlanSchema,
+  LayoutSpecSchema,
+  StyleSpecSchema,
+} from '@app/scene'
 
 import {
   ANALYZE_LAYOUTS_SYSTEM_PROMPT,
@@ -19,6 +23,11 @@ import {
   ANALYZE_REFERENCE_TOOL,
   buildAnalyzeReferenceUserMessage,
 } from '../prompts/analyze-reference'
+import {
+  buildSynthesizeCarouselPlanUserMessage,
+  SYNTHESIZE_CAROUSEL_PLAN_SYSTEM_PROMPT,
+  SYNTHESIZE_CAROUSEL_PLAN_TOOL,
+} from '../prompts/synthesize-carousel-plan'
 import { estimateGeminiCost } from '../pricing'
 import type {
   AIProvider,
@@ -33,6 +42,8 @@ import type {
   IdentifyFontRequest,
   IdentifyFontResult,
   ProviderName,
+  SynthesizeCarouselPlanRequest,
+  SynthesizeCarouselPlanResult,
 } from '../types'
 
 /**
@@ -270,6 +281,75 @@ export class GeminiProvider implements AIProvider {
       })
       throw new Error(
         `GeminiProvider.analyzeLayouts: function output failed validation. ${parsed.error.issues.length} issue(s): ${parsed.error.issues
+          .map((i) => `${i.path.join('.')}: ${i.message}`)
+          .join('; ')}`,
+      )
+    }
+
+    const durationMs = Date.now() - start
+    const usage = response.usageMetadata
+    const inputTokens = usage?.promptTokenCount ?? 0
+    const outputTokens = usage?.candidatesTokenCount ?? 0
+
+    return {
+      data: parsed.data,
+      usage: {
+        provider: 'gemini',
+        model: this.model,
+        durationMs,
+        inputTokens,
+        outputTokens,
+        estimatedCostUsd: estimateGeminiCost(this.model, inputTokens, outputTokens),
+      },
+    }
+  }
+
+  async synthesizeCarouselPlan(
+    req: SynthesizeCarouselPlanRequest,
+    signal?: AbortSignal,
+  ): Promise<SynthesizeCarouselPlanResult> {
+    const start = Date.now()
+
+    const userText = buildSynthesizeCarouselPlanUserMessage({
+      script: req.script,
+      references: req.references,
+      platform: req.platform
+        ? { platform: req.platform.platform, format: req.platform.format }
+        : undefined,
+    })
+
+    const response = await this.client.models.generateContent({
+      model: this.model,
+      contents: [{ role: 'user', parts: [{ text: userText }] }],
+      config: {
+        systemInstruction: SYNTHESIZE_CAROUSEL_PLAN_SYSTEM_PROMPT,
+        tools: [{ functionDeclarations: [SYNTHESIZE_CAROUSEL_PLAN_TOOL] }],
+        toolConfig: {
+          functionCallingConfig: {
+            mode: FunctionCallingConfigMode.ANY,
+            allowedFunctionNames: [SYNTHESIZE_CAROUSEL_PLAN_TOOL.name ?? ''],
+          },
+        },
+        abortSignal: signal,
+      },
+    })
+
+    const functionCalls = response.functionCalls ?? []
+    const call = functionCalls[0]
+    if (!call || !call.args) {
+      throw new Error(
+        'GeminiProvider.synthesizeCarouselPlan: model did not return a function call',
+      )
+    }
+
+    const parsed = CarouselPlanSchema.safeParse(call.args)
+    if (!parsed.success) {
+      console.error('[synthesizeCarouselPlan] validation failed', {
+        rawArgs: JSON.stringify(call.args),
+        zodIssues: parsed.error.issues,
+      })
+      throw new Error(
+        `GeminiProvider.synthesizeCarouselPlan: function output failed validation. ${parsed.error.issues.length} issue(s): ${parsed.error.issues
           .map((i) => `${i.path.join('.')}: ${i.message}`)
           .join('; ')}`,
       )

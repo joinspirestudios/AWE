@@ -21,6 +21,7 @@
  */
 
 import type {
+  CarouselPlan,
   FontGuess,
   LayoutSpec,
   PlatformFormat,
@@ -112,6 +113,43 @@ export interface AnalyzeLayoutsRequest {
 }
 
 export type AnalyzeLayoutsResult = ProviderResult<LayoutSpec>
+
+// =========================================================================
+// TASK: synthesizeCarouselPlan
+//
+// ScriptAnalysis + N references (each with StyleSpec + LayoutSpec) in,
+// CarouselPlan out. The synthesis step that turns "what the creator is
+// saying" + "what they're inspired by" into a per-slide design direction
+// for their carousel.
+//
+// This is reasoning-heavy: pick a composition for each of the user's N
+// script slides that matches its purpose and draws on the references'
+// design language. Cite specific reference patterns when applicable.
+//
+// Primary: Claude (Sonnet — best at structured multi-input reasoning).
+// Fallback: Gemini.
+// =========================================================================
+
+export interface SynthesizeCarouselPlanRequest {
+  /** Script analysis output — slide-by-slide purposes and headlines. */
+  script: ScriptAnalysis
+  /**
+   * References the user provided. Each carries the analyses we've
+   * already cached on the client. References without complete analysis
+   * (style + layouts both done) should be filtered out by the caller
+   * before this call.
+   */
+  references: Array<{
+    /** Stable ID — used in CarouselPlan.slides[].drawsFrom citations. */
+    refId: string
+    ownerUsername?: string
+    style: StyleSpec
+    layouts: LayoutSpec
+  }>
+  platform?: PlatformFormat
+}
+
+export type SynthesizeCarouselPlanResult = ProviderResult<CarouselPlan>
 
 // =========================================================================
 // TASK: identifyFont
@@ -256,6 +294,11 @@ export interface AIProvider {
     signal?: AbortSignal,
   ): Promise<AnalyzeLayoutsResult>
 
+  synthesizeCarouselPlan?(
+    req: SynthesizeCarouselPlanRequest,
+    signal?: AbortSignal,
+  ): Promise<SynthesizeCarouselPlanResult>
+
   identifyFont?(
     req: IdentifyFontRequest,
     signal?: AbortSignal,
@@ -282,6 +325,7 @@ export type TaskName =
   | 'analyzeScript'
   | 'analyzeReference'
   | 'analyzeLayouts'
+  | 'synthesizeCarouselPlan'
   | 'identifyFont'
   | 'embed'
   | 'chat'
@@ -293,15 +337,17 @@ export type TaskRequest<T extends TaskName> = T extends 'analyzeScript'
     ? AnalyzeReferenceRequest
     : T extends 'analyzeLayouts'
       ? AnalyzeLayoutsRequest
-      : T extends 'identifyFont'
-        ? IdentifyFontRequest
-        : T extends 'embed'
-          ? EmbedRequest
-          : T extends 'chat'
-            ? ChatRequest
-            : T extends 'generateImage'
-              ? GenerateImageRequest
-              : never
+      : T extends 'synthesizeCarouselPlan'
+        ? SynthesizeCarouselPlanRequest
+        : T extends 'identifyFont'
+          ? IdentifyFontRequest
+          : T extends 'embed'
+            ? EmbedRequest
+            : T extends 'chat'
+              ? ChatRequest
+              : T extends 'generateImage'
+                ? GenerateImageRequest
+                : never
 
 export type TaskResult<T extends TaskName> = T extends 'analyzeScript'
   ? AnalyzeScriptResult
@@ -309,12 +355,14 @@ export type TaskResult<T extends TaskName> = T extends 'analyzeScript'
     ? AnalyzeReferenceResult
     : T extends 'analyzeLayouts'
       ? AnalyzeLayoutsResult
-      : T extends 'identifyFont'
-        ? IdentifyFontResult
-        : T extends 'embed'
-          ? EmbedResult
-          : T extends 'chat'
-            ? AsyncIterable<ChatStreamChunk>
-            : T extends 'generateImage'
-              ? GenerateImageResult
-              : never
+      : T extends 'synthesizeCarouselPlan'
+        ? SynthesizeCarouselPlanResult
+        : T extends 'identifyFont'
+          ? IdentifyFontResult
+          : T extends 'embed'
+            ? EmbedResult
+            : T extends 'chat'
+              ? AsyncIterable<ChatStreamChunk>
+              : T extends 'generateImage'
+                ? GenerateImageResult
+                : never

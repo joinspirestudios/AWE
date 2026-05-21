@@ -30,6 +30,12 @@ import {
   buildAnalyzeScriptUserMessage,
 } from '../prompts/analyze-script'
 import { estimateClaudeCost } from '../pricing'
+import {
+  buildSynthesizeCarouselPlanUserMessage,
+  isCarouselPlanLike,
+  SYNTHESIZE_CAROUSEL_PLAN_INPUT_SCHEMA,
+  SYNTHESIZE_CAROUSEL_PLAN_SYSTEM_PROMPT,
+} from '../prompts/synthesize-carousel-plan'
 import type {
   AIProvider,
   AnalyzeLayoutsRequest,
@@ -43,6 +49,8 @@ import type {
   IdentifyFontRequest,
   IdentifyFontResult,
   ProviderName,
+  SynthesizeCarouselPlanRequest,
+  SynthesizeCarouselPlanResult,
 } from '../types'
 
 /** Default model. Sonnet is the right balance of cost and quality for reasoning tasks. */
@@ -493,6 +501,126 @@ export class ClaudeProvider implements AIProvider {
         cachedInputTokens: cacheReadTokens,
         estimatedCostUsd: estimateClaudeCost(
           this.modelFor('analyzeLayouts'),
+          inputTokens,
+          outputTokens,
+          cacheReadTokens,
+          cacheCreationTokens,
+        ),
+      },
+    }
+  }
+
+  async synthesizeCarouselPlan(
+    req: SynthesizeCarouselPlanRequest,
+    signal?: AbortSignal,
+  ): Promise<SynthesizeCarouselPlanResult> {
+    const start = Date.now()
+
+    const userMessage = buildSynthesizeCarouselPlanUserMessage({
+      script: req.script,
+      references: req.references,
+      platform: req.platform
+        ? { platform: req.platform.platform, format: req.platform.format }
+        : undefined,
+    })
+
+    // Build Claude's tool from the canonical JSON Schema. The schema is
+    // already in JSON Schema format — Claude accepts that directly. We
+    // do NOT structuredClone here: only Gemini needs that protection
+    // (its SDK mutates parameters in place).
+    const tool = {
+      name: 'submit_carousel_plan',
+      description:
+        'Return the synthesized per-slide design plan for the creator\'s carousel.',
+      input_schema:
+        SYNTHESIZE_CAROUSEL_PLAN_INPUT_SCHEMA as unknown as Record<
+          string,
+          unknown
+        > & {
+          type: 'object'
+        },
+    }
+
+    const response = await this.client.messages.create(
+      {
+        model: this.modelFor('analyzeScript'),
+        // The plan can be verbose if the script is 15+ slides with full
+        // rationale + drawsFrom on each. 8K covers the realistic upper
+        // bound; 16K is overkill but matches our other reasoning tasks.
+        max_tokens: 8_192,
+        // System prompt is identical per call — cache it ephemerally so
+        // repeated synthesis runs in a session benefit.
+        system: [
+          {
+            type: 'text',
+            text: SYNTHESIZE_CAROUSEL_PLAN_SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        messages: [{ role: 'user', content: userMessage }],
+        tools: [tool],
+        tool_choice: { type: 'tool', name: tool.name },
+        metadata: {
+          user_id: 'synthesize-carousel-plan-v1.0.0',
+        },
+      },
+      { signal },
+    )
+
+    if (response.stop_reason === 'max_tokens') {
+      throw new Error(
+        'ClaudeProvider.synthesizeCarouselPlan: response truncated (hit max_tokens). The script + references may be unusually dense.',
+      )
+    }
+
+    const toolUse = response.content.find(
+      (block): block is Extract<typeof block, { type: 'tool_use' }> =>
+        block.type === 'tool_use',
+    )
+
+    if (!toolUse) {
+      throw new Error(
+        `ClaudeProvider.synthesizeCarouselPlan: model did not return a tool_use block (stop_reason=${response.stop_reason})`,
+      )
+    }
+
+    const rawInput = toolUse.input as Record<string, unknown>
+
+    // Defensive: same string-encoded-array pattern as analyzeScript.
+    // Claude occasionally returns `slides` as a JSON string when it
+    // contains lots of escaped content.
+    const normalizedInput: Record<string, unknown> = { ...rawInput }
+    if (typeof normalizedInput.slides === 'string') {
+      try {
+        normalizedInput.slides = JSON.parse(normalizedInput.slides as string)
+      } catch {
+        // Fall through; downstream Zod validation will surface the issue.
+      }
+    }
+
+    if (!isCarouselPlanLike(normalizedInput)) {
+      throw new Error(
+        'ClaudeProvider.synthesizeCarouselPlan: tool input did not contain a non-empty slides array.',
+      )
+    }
+
+    const durationMs = Date.now() - start
+    const inputTokens = response.usage.input_tokens
+    const outputTokens = response.usage.output_tokens
+    const cacheReadTokens = response.usage.cache_read_input_tokens ?? 0
+    const cacheCreationTokens = response.usage.cache_creation_input_tokens ?? 0
+
+    return {
+      data: normalizedInput,
+      usage: {
+        provider: 'claude',
+        model: this.modelFor('analyzeScript'),
+        durationMs,
+        inputTokens,
+        outputTokens,
+        cachedInputTokens: cacheReadTokens,
+        estimatedCostUsd: estimateClaudeCost(
+          this.modelFor('analyzeScript'),
           inputTokens,
           outputTokens,
           cacheReadTokens,

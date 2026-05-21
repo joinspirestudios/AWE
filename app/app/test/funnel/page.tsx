@@ -21,6 +21,7 @@
  * Re-running Analyze overwrites edits with a fresh response.
  */
 
+import type { CSSProperties } from 'react'
 import { useEffect, useMemo, useState } from 'react'
 
 // ────────────────────────────────────────────────────────────────────────
@@ -168,6 +169,45 @@ interface LayoutSpec {
 
 interface LayoutResponse {
   layoutSpec: LayoutSpec
+  usage: UsageOutput
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// CarouselPlan — synthesis output
+//
+// Per-slide design direction for the user's N script slides, produced by
+// /api/synthesize-plan (Claude Sonnet primary, Gemini fallback). This is
+// the "direction" the funnel produces — what each slide should look like,
+// drawing on the references' style and layout patterns.
+// ────────────────────────────────────────────────────────────────────────
+
+interface SlidePlan {
+  /** Zero-indexed position in the user's script slides. */
+  slideIndex: number
+  /** Purpose from script analysis (hook / point / data / quote / etc). */
+  purpose: string
+  /** Composition label — same vocabulary as the references' LayoutSpec. */
+  composition: string
+  /** Element placements in visual reading order. */
+  elements: LayoutElement[]
+  /** Brief 1-2 sentence explanation for this slide's design choice. */
+  rationale: string
+  /** Optional citations to reference slides that informed this plan. */
+  drawsFrom: Array<{
+    refId: string
+    slideIndex?: number
+    what: string
+  }>
+}
+
+interface CarouselPlan {
+  slides: SlidePlan[]
+  /** Optional one-paragraph overview of the carousel's design arc. */
+  overview?: string
+}
+
+interface PlanResponse {
+  plan: CarouselPlan
   usage: UsageOutput
 }
 
@@ -323,6 +363,20 @@ export default function TestFunnelPage() {
     analyzed: number
     total: number
   } | null>(null)
+
+  // Synthesis state — the per-slide direction produced from
+  // (script + references). Fires after script analysis completes and
+  // all references' analyses have settled.
+  const [synthesizing, setSynthesizing] = useState(false)
+  const [planError, setPlanError] = useState<string | null>(null)
+  const [planResult, setPlanResult] = useState<PlanResponse | null>(null)
+
+  // Right-column tab. 'direction' is the default — it's the actual
+  // output of the funnel. 'analysis' is the auditable view showing what
+  // the system saw in the script and references.
+  const [activeTab, setActiveTab] = useState<'direction' | 'analysis'>(
+    'direction',
+  )
 
   const [showRaw, setShowRaw] = useState(false)
 
@@ -602,8 +656,17 @@ export default function TestFunnelPage() {
   }
 
   // ────────────────────────────────────────────────────────────────────────
-  // Actions: analyze (runs script + style in parallel)
+  // Actions: analyze + synthesize
   // ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * "Synthesis intent" flag. analyze() sets this to true; an effect
+   * watches for the precondition (script done + refs settled) and fires
+   * the actual synthesis call when it's met. This decouples the user's
+   * click from the asynchronous reference analyses, which may have been
+   * kicked off well before they pressed Analyze.
+   */
+  const [wantSynthesis, setWantSynthesis] = useState(false)
 
   async function analyze() {
     if (!script.trim()) {
@@ -614,15 +677,21 @@ export default function TestFunnelPage() {
     setAnalysisError(null)
     setStyleError(null)
     setLayoutError(null)
+    setPlanError(null)
     setAnalysisResult(null)
     setStyleResult(null)
     setLayoutResult(null)
+    setPlanResult(null)
     setAnalyzing(true)
 
     // Script analysis fires immediately — it doesn't depend on the
-    // references, so the user sees progress before any vision work
-    // settles. The vision results will appear later from the cached
-    // per-reference state.
+    // references. We mark synthesis as wanted now; an effect picks it
+    // up once both script analysis and all reference analyses have
+    // settled. References that errored count as settled — we proceed
+    // with whatever succeeded rather than blocking on partial failure.
+    setWantSynthesis(true)
+    setSynthesizing(true)
+
     const scriptBody: Record<string, unknown> = { script }
     if (effectiveSlideCount) scriptBody.referenceSlideCount = effectiveSlideCount
 
@@ -634,17 +703,89 @@ export default function TestFunnelPage() {
       setAnalysisResult(result)
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : String(err))
+      // If script analysis failed there's nothing to synthesize against.
+      setWantSynthesis(false)
+      setSynthesizing(false)
     } finally {
       setAnalyzing(false)
     }
 
-    // Vision analyses are cached on each reference. We don't re-run them
-    // here — the per-reference state already has them (or will, when
-    // they finish). The right column reads from the references directly
-    // for display; the legacy styleResult / layoutResult state slots
-    // will be wired to merged data in slice 2 when synthesis lands.
     setLayoutsSamplingInfo(null)
   }
+
+  /**
+   * Build the synthesis payload from currently-settled references and
+   * fire the API call. Called by the effect below when preconditions
+   * are met; not invoked directly from analyze().
+   */
+  async function runSynthesis() {
+    if (!analysisResult) return
+
+    // Only references whose style AND layouts both succeeded contribute
+    // to synthesis. A reference with one task failed is incomplete and
+    // would mislead the synthesizer.
+    const usableRefs = references.filter(
+      (r) =>
+        r.styleAnalysis.status === 'done' &&
+        r.layoutsAnalysis.status === 'done',
+    )
+
+    if (usableRefs.length === 0) {
+      setPlanError(
+        references.length === 0
+          ? 'Add at least one reference for direction.'
+          : 'No references finished analysis successfully. Retry the failed ones above and try again.',
+      )
+      setSynthesizing(false)
+      return
+    }
+
+    const body = {
+      script: analysisResult.analysis,
+      references: usableRefs.map((r) => ({
+        refId: r.id,
+        ownerUsername: r.ownerUsername,
+        style: (r.styleAnalysis as { status: 'done'; data: StyleSpec }).data,
+        layouts: (r.layoutsAnalysis as { status: 'done'; data: LayoutSpec })
+          .data,
+      })),
+    }
+
+    try {
+      const result = await callJson<PlanResponse>('/api/synthesize-plan', body)
+      setPlanResult(result)
+    } catch (err) {
+      setPlanError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSynthesizing(false)
+    }
+  }
+
+  /**
+   * Trigger synthesis when (a) the user has clicked Analyze, (b) script
+   * analysis has landed, and (c) all references have either succeeded
+   * or errored on both vision tasks. Re-fires on retry: if a reference
+   * was failed when Analyze was clicked but the user retried and
+   * succeeded, this picks it up automatically because `references` is
+   * in the dep array.
+   */
+  useEffect(() => {
+    if (!wantSynthesis) return
+    if (!analysisResult) return
+
+    const allSettled = references.every(
+      (r) =>
+        (r.styleAnalysis.status === 'done' ||
+          r.styleAnalysis.status === 'error') &&
+        (r.layoutsAnalysis.status === 'done' ||
+          r.layoutsAnalysis.status === 'error'),
+    )
+    if (!allSettled) return
+
+    setWantSynthesis(false)
+    void runSynthesis()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantSynthesis, analysisResult, references])
 
   // ────────────────────────────────────────────────────────────────────────
   // Actions: edit analysis result (slide + carousel-level)
@@ -862,58 +1003,74 @@ export default function TestFunnelPage() {
             <button
               type="button"
               onClick={analyze}
-              disabled={analyzing || analyzingStyle || analyzingLayouts || !script.trim()}
+              disabled={
+                analyzing ||
+                synthesizing ||
+                analyzingStyle ||
+                analyzingLayouts ||
+                !script.trim()
+              }
               className="w-full rounded-md bg-white px-4 py-2.5 text-sm font-medium text-neutral-900 transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-400"
             >
-              {analyzing || analyzingStyle || analyzingLayouts ? 'Analyzing…' : 'Analyze'}
+              {analyzing
+                ? 'Analyzing script…'
+                : synthesizing
+                  ? 'Synthesizing direction…'
+                  : analyzingStyle || analyzingLayouts
+                    ? 'Analyzing…'
+                    : 'Analyze'}
             </button>
           </section>
 
           {/* ───────────────── RESULTS COLUMN ───────────────── */}
           <section className="min-h-[24rem] space-y-4">
-            {/* Style spec result */}
-            {analyzingStyle && (
-              <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 text-sm text-neutral-400">
-                Gemini analyzing references for style…
-              </div>
-            )}
-            {styleError && (
-              <div className="rounded-lg border border-red-900/60 bg-red-950/40 p-4 text-sm text-red-200">
-                <strong>Style analysis failed:</strong> {styleError}
-              </div>
-            )}
-            {styleResult && <StyleSpecCard data={styleResult} />}
+            {/* Tab strip */}
+            <div className="flex gap-1 border-b border-neutral-800">
+              <TabButton
+                label="Direction"
+                active={activeTab === 'direction'}
+                onClick={() => setActiveTab('direction')}
+                badge={planResult ? '✓' : null}
+              />
+              <TabButton
+                label="Analysis"
+                active={activeTab === 'analysis'}
+                onClick={() => setActiveTab('analysis')}
+                badge={analysisResult ? '✓' : null}
+              />
+            </div>
 
-            {/* Layout spec result */}
-            {analyzingLayouts && (
-              <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4 text-sm text-neutral-400">
-                Gemini extracting layout templates…
-                {layoutsSamplingInfo && (
-                  <span className="ml-2 text-xs text-neutral-500">
-                    (analyzing {layoutsSamplingInfo.analyzed} of{' '}
-                    {layoutsSamplingInfo.total} slides)
-                  </span>
+            {activeTab === 'direction' ? (
+              <DirectionPanel
+                synthesizing={synthesizing}
+                error={planError}
+                plan={planResult?.plan ?? null}
+                references={references}
+                analysisResult={analysisResult}
+              />
+            ) : (
+              <>
+                {/* Script analysis result */}
+                <AnalysisPanel
+                  loading={analyzing}
+                  error={analysisError}
+                  result={analysisResult}
+                  onUpdateCarouselMeta={updateCarouselMeta}
+                  onUpdateSlide={updateSlide}
+                  onDeleteSlide={deleteSlide}
+                />
+
+                {/* Legacy aggregated views — left in for inspection,
+                    will likely move to per-ref display in a follow-up. */}
+                {styleResult && <StyleSpecCard data={styleResult} />}
+                {layoutResult && (
+                  <LayoutSpecCard
+                    data={layoutResult}
+                    sampling={layoutsSamplingInfo}
+                  />
                 )}
-              </div>
+              </>
             )}
-            {layoutError && (
-              <div className="rounded-lg border border-red-900/60 bg-red-950/40 p-4 text-sm text-red-200">
-                <strong>Layout analysis failed:</strong> {layoutError}
-              </div>
-            )}
-            {layoutResult && (
-              <LayoutSpecCard data={layoutResult} sampling={layoutsSamplingInfo} />
-            )}
-
-            {/* Script analysis result */}
-            <AnalysisPanel
-              loading={analyzing}
-              error={analysisError}
-              result={analysisResult}
-              onUpdateCarouselMeta={updateCarouselMeta}
-              onUpdateSlide={updateSlide}
-              onDeleteSlide={deleteSlide}
-            />
 
             {/* Raw JSON toggle */}
             {(analysisResult || styleResult || layoutResult) && (
@@ -1218,6 +1375,309 @@ function ShimmerCard({
       `}</style>
     </div>
   )
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Subcomponent — TabButton
+// ────────────────────────────────────────────────────────────────────────
+
+function TabButton({
+  label,
+  active,
+  onClick,
+  badge,
+}: {
+  label: string
+  active: boolean
+  onClick: () => void
+  badge: string | null
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`relative -mb-px border-b-2 px-4 py-2 text-sm font-medium transition ${
+        active
+          ? 'border-white text-white'
+          : 'border-transparent text-neutral-500 hover:text-neutral-300'
+      }`}
+    >
+      {label}
+      {badge && (
+        <span className="ml-1.5 inline-flex items-center text-[10px] text-emerald-400">
+          {badge}
+        </span>
+      )}
+    </button>
+  )
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Subcomponent — DirectionPanel
+//
+// Renders the synthesized CarouselPlan. Shows a loading state while
+// synthesis is in flight, an error with a re-analyze hint on failure,
+// and a per-slide breakdown of the plan when it lands.
+// ────────────────────────────────────────────────────────────────────────
+
+function DirectionPanel({
+  synthesizing,
+  error,
+  plan,
+  references,
+  analysisResult,
+}: {
+  synthesizing: boolean
+  error: string | null
+  plan: CarouselPlan | null
+  references: Reference[]
+  analysisResult: AnalysisResponse | null
+}) {
+  if (synthesizing) {
+    return (
+      <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-6">
+        <div className="text-sm font-medium text-neutral-200">
+          Synthesizing direction…
+        </div>
+        <div className="mt-2 text-xs text-neutral-500">
+          Reading the script against {references.length} reference
+          {references.length === 1 ? '' : 's'} to build a per-slide design plan.
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="rounded-lg border border-red-900/60 bg-red-950/40 p-6">
+        <div className="text-sm font-medium text-red-200">
+          Synthesis didn't run
+        </div>
+        <div className="mt-2 text-xs text-red-300/80">{error}</div>
+      </div>
+    )
+  }
+
+  if (!plan) {
+    // Hasn't been analyzed yet, or there's nothing to show
+    return (
+      <div className="rounded-lg border border-dashed border-neutral-800 bg-neutral-950 p-8 text-center">
+        <div className="text-sm text-neutral-400">
+          Direction will appear here.
+        </div>
+        <div className="mt-1.5 text-xs text-neutral-600">
+          Paste a script, add 1–4 references, then press Analyze.
+        </div>
+      </div>
+    )
+  }
+
+  // Build a refId → label map so drawsFrom citations can show "@username"
+  // instead of opaque IDs.
+  const refLabel = (refId: string): string => {
+    const ref = references.find((r) => r.id === refId)
+    if (!ref) return refId
+    return ref.ownerUsername ? `@${ref.ownerUsername}` : refId
+  }
+
+  return (
+    <div className="space-y-4">
+      {plan.overview && (
+        <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+          <div className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+            Overview
+          </div>
+          <p className="mt-1.5 text-sm leading-relaxed text-neutral-200">
+            {plan.overview}
+          </p>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {plan.slides.map((slidePlan) => {
+          // Pull the script slide's headline so the user can connect plan
+          // → content without context-switching.
+          const scriptSlide =
+            analysisResult?.analysis.slides[slidePlan.slideIndex]
+          return (
+            <SlidePlanCard
+              key={slidePlan.slideIndex}
+              slidePlan={slidePlan}
+              scriptHeadline={scriptSlide?.headline}
+              refLabel={refLabel}
+            />
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Subcomponent — SlidePlanCard
+//
+// One slide's design direction: slide number, purpose, composition,
+// elements, rationale, and which references it draws from.
+// ────────────────────────────────────────────────────────────────────────
+
+function SlidePlanCard({
+  slidePlan,
+  scriptHeadline,
+  refLabel,
+}: {
+  slidePlan: SlidePlan
+  scriptHeadline: string | undefined
+  refLabel: (refId: string) => string
+}) {
+  return (
+    <article className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+      <header className="flex items-baseline justify-between gap-3">
+        <div className="flex items-baseline gap-2">
+          <span className="text-xs font-mono text-neutral-500">
+            #{String(slidePlan.slideIndex + 1).padStart(2, '0')}
+          </span>
+          <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-neutral-300">
+            {slidePlan.purpose}
+          </span>
+        </div>
+        <span className="text-[11px] text-neutral-500">
+          {slidePlan.composition}
+        </span>
+      </header>
+
+      {scriptHeadline && (
+        <p className="mt-2 text-sm font-medium text-neutral-100">
+          {scriptHeadline}
+        </p>
+      )}
+
+      <LayoutBlueprintMini elements={slidePlan.elements} />
+
+      <p className="mt-3 text-xs leading-relaxed text-neutral-400">
+        {slidePlan.rationale}
+      </p>
+
+      {slidePlan.drawsFrom.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {slidePlan.drawsFrom.map((draw, i) => (
+            <span
+              key={`${draw.refId}-${i}`}
+              className="rounded-full border border-neutral-800 bg-neutral-950 px-2 py-0.5 text-[10px] text-neutral-400"
+              title={draw.what}
+            >
+              {refLabel(draw.refId)}
+              {typeof draw.slideIndex === 'number' &&
+                ` · slide ${draw.slideIndex + 1}`}
+              <span className="ml-1 text-neutral-500">· {draw.what}</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </article>
+  )
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Subcomponent — LayoutBlueprintMini
+//
+// Tiny visual placeholder showing where elements sit on a slide.
+// Reads element.region (e.g. "top", "center", "bottom-left") and draws
+// labeled rectangles in a 4:5 box. Not pixel-accurate — meant to give
+// a quick "what does this composition feel like" read.
+// ────────────────────────────────────────────────────────────────────────
+
+function LayoutBlueprintMini({
+  elements,
+}: {
+  elements: LayoutElement[]
+}) {
+  if (elements.length === 0) {
+    return (
+      <div className="mt-3 flex aspect-[4/5] w-32 items-center justify-center rounded border border-dashed border-neutral-800 bg-neutral-950 text-[10px] text-neutral-600">
+        no elements
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-3 grid grid-cols-[8rem_1fr] gap-3">
+      <div className="relative aspect-[4/5] rounded border border-neutral-800 bg-neutral-950 p-1">
+        {elements.map((el, i) => {
+          const pos = regionToBoxStyle(el.region)
+          return (
+            <div
+              key={i}
+              className="absolute flex items-center justify-center overflow-hidden rounded-sm bg-neutral-700/60 text-[8px] text-neutral-300"
+              style={pos}
+              title={`${el.type} · ${el.role ?? ''}`}
+            >
+              {abbreviateType(el.type)}
+            </div>
+          )
+        })}
+      </div>
+      <ul className="space-y-1 text-[11px] text-neutral-400">
+        {elements.map((el, i) => (
+          <li key={i} className="flex items-baseline gap-1.5">
+            <span className="text-neutral-500">{el.type}</span>
+            <span className="text-neutral-600">·</span>
+            <span className="text-neutral-500">{el.region}</span>
+            {el.role && (
+              <>
+                <span className="text-neutral-600">·</span>
+                <span className="text-neutral-400">{el.role}</span>
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/** Map a region name to absolute-positioned box style inside the blueprint. */
+function regionToBoxStyle(region: string): CSSProperties {
+  // Treat regions as approximate quadrants. Unknown regions get a small
+  // centered placeholder so we don't crash on free-form labels.
+  const r = region.toLowerCase()
+  const top = r.includes('top')
+  const bottom = r.includes('bottom')
+  const left = r.includes('left')
+  const right = r.includes('right')
+  const full = r.includes('full') || r === 'background'
+
+  if (full) {
+    return { top: '4%', left: '4%', right: '4%', bottom: '4%' }
+  }
+
+  const vBand = top ? '4%' : bottom ? '54%' : '32%'
+  const vHeight = top || bottom ? '42%' : '36%'
+  const hBand = left ? '4%' : right ? '54%' : '20%'
+  const hWidth = left || right ? '42%' : '60%'
+
+  return {
+    top: vBand,
+    left: hBand,
+    width: hWidth,
+    height: vHeight,
+  }
+}
+
+function abbreviateType(type: string): string {
+  // 1-2 char tag for the blueprint box. Keep it readable at 8px.
+  const map: Record<string, string> = {
+    headline: 'H',
+    body: 'B',
+    image: 'IMG',
+    callout: 'C',
+    number: '#',
+    quote: 'Q',
+    badge: 'BD',
+    logo: 'LG',
+    decoration: '·',
+    background: 'BG',
+  }
+  return map[type.toLowerCase()] ?? type.slice(0, 2).toUpperCase()
 }
 
 // ────────────────────────────────────────────────────────────────────────

@@ -22,7 +22,7 @@ import { z } from 'zod'
 import { getRouter } from '@/lib/ai'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 180
 
 const RequestSchema = z.object({
   script: z.string().min(10, 'Script is too short').max(20_000, 'Script is too long'),

@@ -25,7 +25,7 @@ import { z } from 'zod'
 import { getRouter } from '@/lib/ai'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 180
 
 const RequestSchema = z.object({
   images: z

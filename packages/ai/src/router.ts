@@ -40,6 +40,7 @@ export const DEFAULT_ROUTES: Readonly<Record<TaskName, readonly ProviderName[]>>
   analyzeScript: ['claude', 'gemini'],
   analyzeReference: ['gemini', 'claude'],
   analyzeLayouts: ['gemini', 'claude'],
+  synthesizeCarouselPlan: ['claude', 'gemini'],
   identifyFont: ['gemini', 'claude'],
   embed: ['openai'],
   chat: ['claude', 'gemini'],
@@ -47,21 +48,22 @@ export const DEFAULT_ROUTES: Readonly<Record<TaskName, readonly ProviderName[]>>
 }
 
 /**
- * Per-attempt timeouts for non-streaming tasks. Asymmetric on purpose:
+ * Per-attempt timeouts for non-streaming tasks. Symmetric now that
+ * Vercel Pro raises the function ceiling to 300s — we no longer need
+ * to squeeze both attempts into a 60s budget. Each provider gets a
+ * generous 50s to complete on its own merits.
  *
- *   - PRIMARY_ATTEMPT_TIMEOUT (20s) — Gemini Flash routinely finishes in
- *     14-18s when it's healthy. If it's going to take longer, it's
- *     almost certainly hung or overloaded and we want to fall over fast.
- *   - FALLBACK_ATTEMPT_TIMEOUT (35s) — Claude Sonnet vision needs 25-30s
- *     for 8 images of structured tool-calling output. 35s gives it real
- *     room to finish without losing quality (vs swapping in Haiku).
+ *   - Gemini Flash routinely finishes in 14-18s; 50s covers worst-case
+ *     latency spikes without aborting healthy calls.
+ *   - Claude Sonnet vision finishes 16-slide LayoutSpec output in
+ *     30-40s; 50s gives it real headroom to finish without quality
+ *     compromises.
  *
- * Total worst case: 20s + 35s = 55s, leaving ~5s safety margin under
- * Vercel's 60s Hobby-plan function ceiling. The fast-fail case (primary
- * 503s in <1s) gives the fallback the full 35s with budget to spare.
+ * Total worst case (both attempts time out): 100s, well under Pro's
+ * 300s ceiling. Routes set maxDuration accordingly.
  */
-const PRIMARY_ATTEMPT_TIMEOUT_MS = 20_000
-const FALLBACK_ATTEMPT_TIMEOUT_MS = 35_000
+const PRIMARY_ATTEMPT_TIMEOUT_MS = 50_000
+const FALLBACK_ATTEMPT_TIMEOUT_MS = 50_000
 
 export interface RouterOptions {
   providers: AIProvider[]

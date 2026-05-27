@@ -25,7 +25,7 @@ import type {
   StyleSpec,
 } from '@app/scene'
 
-export const SYNTHESIZE_CAROUSEL_PLAN_VERSION = 'v1.0.0'
+export const SYNTHESIZE_CAROUSEL_PLAN_VERSION = 'v1.1.0'
 
 export const SYNTHESIZE_CAROUSEL_PLAN_SYSTEM_PROMPT = `You are a senior creative director synthesizing per-slide design direction for a creator's carousel, drawing on visual references they've provided.
 
@@ -40,11 +40,29 @@ You'll see:
 
 ## What you produce
 
-A **CarouselPlan**: one SlidePlan per script slide. Each SlidePlan is the design decision for that slide — what composition it uses, what elements it contains, why, and which references informed it.
+A **CarouselPlan** with two parts:
 
-## How to think about this
+1. A unified **style** — colors, typography, layout grammar, background type/mood, motifs, and slide-pattern decision — that defines the visual identity for the entire carousel. *One* style for all slides, synthesized from the references and the script's tone.
+2. One **SlidePlan** per script slide — the per-slide design decision: composition label, element placements, rationale, and drawsFrom citations.
 
-You are not designing in a vacuum. You are translating the creator's content (script) into the design language of their references. Each script slide's purpose should drive the composition choice; each composition choice should draw on what the references have shown is appropriate.
+Plus optional **overview** prose tying it together.
+
+## How to think about the unified style
+
+You're not picking a reference and copying it. You're deciding what *this carousel* should look like, informed by the references but committed to a single coherent identity.
+
+For each style field, decide deliberately:
+
+- **colors.primary / accents** — usually inherit from the references (creators reuse brand colors). When references conflict, pick the palette that fits the script's tone — confident-direct sells with bolder colors; thoughtful-educational sells with muted ones.
+- **typography** — pick category (serif/sans/display/monospace) + weight + hierarchy. If a specific font family recurs across reference's headlineFontGuesses, surface it in headlineFontGuesses with high confidence; otherwise leave the array empty and let the renderer fall back.
+- **layout** — alignment, grid density, fullBleed. If the references are mixed, lean toward what the script needs (data-heavy scripts want loose grids; quote/hook-heavy scripts can take tight).
+- **background.type / mood** — the dominant background treatment. Per-slide variations (e.g., the CTA goes dark-photo-overlay while the rest are texture) are expressed in each SlidePlan's composition, not by overriding the unified style.
+- **motifs** — the carousel's identity beats. Free-form short phrases: "grainy film texture", "oval callout stickers", "big numerals", "split-panel".
+- **slidePattern** — consistent (template-like), varied (each slide its own visual idea), or progressive (an arc builds across slides).
+
+## How to think about per-slide plans
+
+You are translating the creator's content (script) into the design language of the unified style you just set. Each script slide's purpose drives the composition choice; the composition choice draws on what the references have shown is appropriate within that style.
 
 For every slide:
 
@@ -95,7 +113,7 @@ Call the submit_carousel_plan tool with the structured CarouselPlan. One slide p
  */
 export const SYNTHESIZE_CAROUSEL_PLAN_INPUT_SCHEMA: Record<string, unknown> = {
   type: 'object',
-  required: ['slides'],
+  required: ['slides', 'style'],
   properties: {
     slides: {
       type: 'array',
@@ -206,6 +224,154 @@ export const SYNTHESIZE_CAROUSEL_PLAN_INPUT_SCHEMA: Record<string, unknown> = {
               },
             },
           },
+        },
+      },
+    },
+    style: {
+      type: 'object',
+      description:
+        'Unified visual style for the entire carousel — synthesized across the references and the script\'s tone, not copied from any one reference. Drives every slide\'s render.',
+      required: [
+        'colors',
+        'typography',
+        'layout',
+        'background',
+        'motifs',
+        'slidePattern',
+      ],
+      properties: {
+        colors: {
+          type: 'object',
+          required: ['primary', 'accents'],
+          properties: {
+            primary: {
+              type: 'array',
+              minItems: 1,
+              description:
+                'Primary brand colors as hex strings (e.g. "#FFB200"). At least one. Order them by visual dominance.',
+              items: { type: 'string' },
+            },
+            accents: {
+              type: 'array',
+              description:
+                'Accent colors as hex strings — used for callouts, decorative motifs, secondary emphasis.',
+              items: { type: 'string' },
+            },
+          },
+        },
+        typography: {
+          type: 'object',
+          required: [
+            'headlineStyle',
+            'headlineWeight',
+            'bodyStyle',
+            'hierarchy',
+            'headlineFontGuesses',
+            'bodyFontGuesses',
+          ],
+          properties: {
+            headlineStyle: {
+              type: 'string',
+              enum: ['serif', 'sans', 'display', 'monospace'],
+              description: 'Headline typography category.',
+            },
+            headlineWeight: {
+              type: 'string',
+              enum: ['light', 'regular', 'medium', 'bold', 'black'],
+            },
+            bodyStyle: {
+              type: 'string',
+              enum: ['serif', 'sans'],
+              description: 'Body text typography category.',
+            },
+            hierarchy: {
+              type: 'string',
+              enum: ['high-contrast', 'subtle'],
+              description:
+                'How aggressively headline and body should differ in size/weight.',
+            },
+            headlineFontGuesses: {
+              type: 'array',
+              maxItems: 3,
+              description:
+                'Up to 3 ranked headline font candidates, top match first. Empty if no specific family is identifiable.',
+              items: {
+                type: 'object',
+                required: ['family', 'weight', 'confidence'],
+                properties: {
+                  family: { type: 'string' },
+                  weight: { type: 'number' },
+                  style: {
+                    type: 'string',
+                    enum: ['normal', 'italic'],
+                  },
+                  confidence: { type: 'number' },
+                },
+              },
+            },
+            bodyFontGuesses: {
+              type: 'array',
+              maxItems: 3,
+              description: 'Same shape as headlineFontGuesses, for body.',
+              items: {
+                type: 'object',
+                required: ['family', 'weight', 'confidence'],
+                properties: {
+                  family: { type: 'string' },
+                  weight: { type: 'number' },
+                  style: {
+                    type: 'string',
+                    enum: ['normal', 'italic'],
+                  },
+                  confidence: { type: 'number' },
+                },
+              },
+            },
+          },
+        },
+        layout: {
+          type: 'object',
+          required: ['alignment', 'grid', 'fullBleed'],
+          properties: {
+            alignment: {
+              type: 'string',
+              enum: ['left', 'center', 'right', 'mixed'],
+            },
+            grid: {
+              type: 'string',
+              enum: ['tight', 'loose', 'asymmetric'],
+            },
+            fullBleed: {
+              type: 'boolean',
+              description: 'Whether content should run to slide edges by default.',
+            },
+          },
+        },
+        background: {
+          type: 'object',
+          required: ['type', 'mood'],
+          properties: {
+            type: {
+              type: 'string',
+              enum: ['solid', 'gradient', 'photo', 'photo-overlay', 'texture'],
+            },
+            mood: {
+              type: 'string',
+              enum: ['dark', 'light', 'high-contrast'],
+            },
+          },
+        },
+        motifs: {
+          type: 'array',
+          description:
+            'Free-form descriptors that capture the carousel\'s visual identity: "grainy texture", "oval callout stickers", "big numerals", "split-panel". 0-8 items.',
+          items: { type: 'string' },
+        },
+        slidePattern: {
+          type: 'string',
+          enum: ['consistent', 'varied', 'progressive'],
+          description:
+            'How much the slides vary from each other visually. "consistent" = template-like, "progressive" = builds an arc, "varied" = each is its own visual idea.',
         },
       },
     },
@@ -368,6 +534,13 @@ export function buildSynthesizeCarouselPlanUserMessage(input: {
       lines.push(`Overview: ${input.existingPlan.overview}`)
       lines.push('')
     }
+    // The existing unified style — must be echoed back unchanged in the
+    // response. JSON-dumped because every field matters for the renderer.
+    lines.push('Existing unified style (return this verbatim):')
+    lines.push('```json')
+    lines.push(JSON.stringify(input.existingPlan.style, null, 2))
+    lines.push('```')
+    lines.push('')
     lines.push('Current plan slides:')
     for (const slide of input.existingPlan.slides) {
       const els = slide.elements
@@ -394,10 +567,16 @@ export function buildSynthesizeCarouselPlanUserMessage(input: {
     lines.push(
       `Keep the regenerated slides consistent with the rest of the existing plan: same composition vocabulary, same drawsFrom citation style, same level of rationale detail. Don't redesign the whole carousel for one slide.`,
     )
+    // Partial mode must still return a valid CarouselPlan, which means
+    // a `style` is required. Re-emit the existing plan's style verbatim
+    // so the renderer sees no shift on retry.
+    lines.push(
+      `Include the unified style field as-is from the existing plan above — do not change colors, typography, motifs, or any other style attribute. Style stays stable across per-slide retries.`,
+    )
     lines.push('Call submit_carousel_plan with the partial result.')
   } else {
     lines.push(
-      `Now produce the CarouselPlan: one SlidePlan per script slide (${input.script.recommendedSlideCount} total), in slideIndex order. Call submit_carousel_plan with the result.`,
+      `Now produce the CarouselPlan: synthesize the unified style first, then one SlidePlan per script slide (${input.script.recommendedSlideCount} total), in slideIndex order. Call submit_carousel_plan with the result.`,
     )
   }
 

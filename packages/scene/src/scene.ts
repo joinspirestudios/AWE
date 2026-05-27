@@ -681,6 +681,18 @@ export const CarouselPlanSchema = z.object({
   /** Per-slide plans, ordered by slideIndex. */
   slides: z.array(SlidePlanSchema).min(1),
   /**
+   * Unified visual style synthesized for the carousel. This is *not*
+   * any single reference's StyleSpec — the synthesizer reads all the
+   * references and produces one coherent style that fits the script's
+   * tone and audience. The renderer uses this as the source of truth
+   * for typography, colors, backgrounds, motifs across every slide.
+   *
+   * Per-slide variation (e.g., background mood shifting from texture
+   * to dark photo overlay on the CTA slide) is expressed in each
+   * SlidePlan's composition + elements, not by overriding this style.
+   */
+  style: StyleSpecSchema,
+  /**
    * Optional one-paragraph overview of the carousel's design direction —
    * how the slides connect visually as a set, the dominant motif, the
    * pacing. Distinct from per-slide rationale.

@@ -202,6 +202,13 @@ interface SlidePlan {
 
 interface CarouselPlan {
   slides: SlidePlan[]
+  /**
+   * Unified visual style synthesized for the whole carousel — the
+   * renderer's source of truth. Added in v1.1.0 of the synthesis
+   * prompt. Plans synthesized before that won't have it; the editor
+   * checks for presence and shows a fallback message in that case.
+   */
+  style: StyleSpec
   /** Optional one-paragraph overview of the carousel's design arc. */
   overview?: string
 }
@@ -1187,17 +1194,27 @@ export default function TestFunnelPage() {
             </div>
 
             {activeTab === 'direction' ? (
-              <DirectionPanel
-                synthesizing={synthesizing}
-                error={planError}
-                plan={planResult?.plan ?? null}
-                references={references}
-                analysisResult={analysisResult}
-                staleSlides={staleSlides}
-                retryingSlide={retryingSlide}
-                retryError={retryError}
-                onRetrySlide={retrySlideSynthesis}
-              />
+              <>
+                <DirectionPanel
+                  synthesizing={synthesizing}
+                  error={planError}
+                  plan={planResult?.plan ?? null}
+                  references={references}
+                  analysisResult={analysisResult}
+                  staleSlides={staleSlides}
+                  retryingSlide={retryingSlide}
+                  retryError={retryError}
+                  onRetrySlide={retrySlideSynthesis}
+                />
+                {planResult && analysisResult && (
+                  <OpenEditorButton
+                    plan={planResult.plan}
+                    script={analysisResult.analysis}
+                    references={references}
+                    isStale={staleSlides.size > 0}
+                  />
+                )}
+              </>
             ) : (
               <>
                 {/* Script analysis result */}
@@ -1523,6 +1540,78 @@ function ShimmerCard({
           will-change: opacity, transform;
         }
       `}</style>
+    </div>
+  )
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Subcomponent — OpenEditorButton
+//
+// Persists the current funnel state to localStorage under a known key
+// and navigates to /test/editor where the Konva renderer picks it up.
+// Slim payload: just the plan, the script analysis, and a minimal
+// reference projection (id + ownerUsername) for citation display.
+// ────────────────────────────────────────────────────────────────────────
+
+/** localStorage key — must match the editor page's STORAGE_KEY. */
+const EDITOR_STORAGE_KEY = 'awe.editor.payload.v1'
+
+function OpenEditorButton({
+  plan,
+  script,
+  references,
+  isStale,
+}: {
+  plan: NonNullable<PlanResponse['plan']>
+  script: AnalysisOutput
+  references: Reference[]
+  isStale: boolean
+}) {
+  const handleOpen = () => {
+    const payload = {
+      plan,
+      script,
+      references: references.map((r) => ({
+        id: r.id,
+        ownerUsername: r.ownerUsername,
+      })),
+      savedAt: Date.now(),
+    }
+    try {
+      window.localStorage.setItem(EDITOR_STORAGE_KEY, JSON.stringify(payload))
+      window.location.href = '/test/editor'
+    } catch (err) {
+      // localStorage write failures are rare but possible (quota, private
+      // browsing). Surface the error rather than failing silently.
+      console.error('Could not save editor payload', err)
+      window.alert(
+        err instanceof Error
+          ? `Couldn't save to localStorage: ${err.message}`
+          : 'Could not save editor payload.',
+      )
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-4">
+      {isStale && (
+        <p className="mb-3 text-[11px] text-amber-300/80">
+          The plan has stale slides. Re-Analyze for a fresh plan or use
+          per-slide retry before opening the editor for the most accurate
+          rendering.
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={handleOpen}
+        className={`w-full rounded-md px-4 py-2.5 text-sm font-medium transition ${
+          isStale
+            ? 'bg-amber-300 text-neutral-900 hover:bg-amber-200'
+            : 'bg-white text-neutral-900 hover:bg-neutral-200'
+        }`}
+      >
+        Open Editor →
+      </button>
     </div>
   )
 }

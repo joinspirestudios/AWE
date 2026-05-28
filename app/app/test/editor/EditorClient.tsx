@@ -507,17 +507,21 @@ function SlideCanvas({
 
         {/* Elements — rendered in array order, which the synthesizer should
             have produced in visual reading order (back-to-front). */}
-        {slidePlan.elements.map((el, i) => (
-          <ElementShape
-            key={i}
-            element={el}
-            box={boxes[i]}
-            style={style}
-            palette={palette}
-            scriptSlide={scriptSlide}
-            slideIndex={slidePlan.slideIndex}
-          />
-        ))}
+        {slidePlan.elements.map((el, i) => {
+          const box = boxes[i]
+          if (!box) return null
+          return (
+            <ElementShape
+              key={i}
+              element={el}
+              box={box}
+              style={style}
+              palette={palette}
+              scriptSlide={scriptSlide}
+              slideIndex={slidePlan.slideIndex}
+            />
+          )
+        })}
       </Layer>
     </Stage>
   )
@@ -1131,7 +1135,9 @@ function layoutInGrid(
 ) {
   const byRow: Record<VBand, number[]> = { top: [], middle: [], bottom: [] }
   for (const i of indices) {
-    const [v] = parseRegion(elements[i].region as GridRegion)
+    const el = elements[i]
+    if (!el) continue
+    const [v] = parseRegion(el.region as GridRegion)
     byRow[v].push(i)
   }
 
@@ -1209,7 +1215,9 @@ function layoutRow(
   // Group by h-band within this row.
   const byCol: Record<HBand, number[]> = { left: [], center: [], right: [] }
   for (const i of rowIndices) {
-    const [, h] = parseRegion(elements[i].region as GridRegion)
+    const el = elements[i]
+    if (!el) continue
+    const [, h] = parseRegion(el.region as GridRegion)
     byCol[h].push(i)
   }
 
@@ -1232,6 +1240,7 @@ function layoutRow(
 
     colIndices.forEach((elIdx, stackIdx) => {
       const el = elements[elIdx]
+      if (!el) return
       const slotY = rowY + stackIdx * slotH
       boxes[elIdx] = boxForCell(el, colX, slotY, colWidth, slotH)
     })
@@ -1319,6 +1328,7 @@ function layoutOverlays(
 
   for (const i of indices) {
     const el = elements[i]
+    if (!el) continue
     if (el.type === 'image') {
       boxes[i] = { x: 0, y: 0, width: SLIDE_W, height: SLIDE_H }
     } else if (el.type === 'decoration') {

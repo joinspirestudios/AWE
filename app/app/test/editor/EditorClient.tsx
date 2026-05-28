@@ -62,6 +62,8 @@ interface LayoutElement {
   region: Region
   size: ElementSize
   role: string
+  /** Literal display text bound to this slot by the synthesizer. */
+  content?: string
   notes?: string
 }
 
@@ -736,13 +738,17 @@ function ElementShape({
       return (
         <TextElement
           box={box}
-          text={scriptSlide.headline}
+          text={element.content ?? scriptSlide.headline}
           fontFamily={typographyFontFamily(
             style.typography.headlineStyle,
             headlineFamily,
           )}
           fontWeight={typographyWeight(style.typography.headlineWeight)}
-          fontSize={fontSizeFor('headline', element.size, style.typography.hierarchy)}
+          fontSize={fontSizeToFit(
+            element.content ?? scriptSlide.headline,
+            box,
+            fontSizeFor('headline', element.size, style.typography.hierarchy),
+          )}
           fill={palette.fg}
           align={textAlignFromRegion(element.region, style.layout.alignment)}
           letterSpacing={
@@ -755,13 +761,17 @@ function ElementShape({
       return (
         <TextElement
           box={box}
-          text={scriptSlide.body ?? ''}
+          text={element.content ?? scriptSlide.body ?? ''}
           fontFamily={typographyFontFamily(
             style.typography.bodyStyle,
             bodyFamily,
           )}
           fontWeight={400}
-          fontSize={fontSizeFor('body', element.size, style.typography.hierarchy)}
+          fontSize={fontSizeToFit(
+            element.content ?? scriptSlide.body ?? '',
+            box,
+            fontSizeFor('body', element.size, style.typography.hierarchy),
+          )}
           fill={palette.fg}
           align={textAlignFromRegion(element.region, style.layout.alignment)}
         />
@@ -771,13 +781,17 @@ function ElementShape({
       return (
         <TextElement
           box={box}
-          text={scriptSlide.body ?? scriptSlide.headline}
+          text={element.content ?? scriptSlide.body ?? scriptSlide.headline}
           fontFamily={typographyFontFamily(
             style.typography.headlineStyle,
             headlineFamily,
           )}
           fontWeight={typographyWeight(style.typography.headlineWeight)}
-          fontSize={fontSizeFor('quote', element.size, style.typography.hierarchy)}
+          fontSize={fontSizeToFit(
+            element.content ?? scriptSlide.body ?? scriptSlide.headline,
+            box,
+            fontSizeFor('quote', element.size, style.typography.hierarchy),
+          )}
           fill={palette.fg}
           fontStyle="italic"
           align={textAlignFromRegion(element.region, style.layout.alignment)}
@@ -785,17 +799,24 @@ function ElementShape({
       )
 
     case 'number': {
-      // For step slides, the slide index works as the number; otherwise
-      // we render the role text (e.g. "01" or "$5K") as-given.
+      // Prefer explicit content; else pull a numeric token from the
+      // role; else fall back to the slide position.
       const numericFromRole = element.role.match(/[0-9$.,KMB]+/)?.[0]
-      const text = numericFromRole ?? String(slideIndex + 1).padStart(2, '0')
+      const text =
+        element.content ??
+        numericFromRole ??
+        String(slideIndex + 1).padStart(2, '0')
       return (
         <TextElement
           box={box}
           text={text}
           fontFamily={typographyFontFamily('display', headlineFamily)}
           fontWeight={900}
-          fontSize={fontSizeFor('number', element.size, 'high-contrast')}
+          fontSize={fontSizeToFit(
+            text,
+            box,
+            fontSizeFor('number', element.size, 'high-contrast'),
+          )}
           fill={palette.accent}
           align="center"
           letterSpacing={-2}
@@ -807,7 +828,7 @@ function ElementShape({
       return (
         <CalloutShape
           box={box}
-          text={element.role}
+          text={element.content ?? element.role}
           fill={palette.accent}
           textFill={palette.accentFg}
         />
@@ -817,19 +838,27 @@ function ElementShape({
       return (
         <BadgeShape
           box={box}
-          text={element.role}
+          text={element.content ?? element.role}
           fill={palette.subtle}
           textFill={palette.fg}
         />
       )
 
-    case 'image':
     case 'decoration':
+      // Decorations are visual dividers/accents, not labeled boxes.
+      // Render an actual divider line (vertical or horizontal based on
+      // the box's aspect) in the accent color.
+      return <DecorationShape box={box} palette={palette} />
+
+    case 'image':
     case 'logo':
+      // Until Slice 2 wires real imagery, these stay as subtle
+      // placeholder blocks — but without the loud debug label. A faint
+      // tinted block reads as "image goes here" without shouting.
       return (
         <PlaceholderRect
           box={box}
-          label={`${element.type.toUpperCase()} · ${element.role}`}
+          label={element.type === 'logo' ? 'logo' : ''}
           fill={element.type === 'logo' ? palette.subtle : palette.placeholder}
           labelFill={palette.placeholderLabel}
         />
@@ -1029,22 +1058,61 @@ function PlaceholderRect({
         width={box.width}
         height={box.height}
         fill={fill}
-        cornerRadius={4}
+        cornerRadius={8}
       />
-      <Text
-        x={box.x}
-        y={box.y}
-        width={box.width}
-        height={box.height}
-        text={label}
-        fontFamily="ui-monospace, monospace"
-        fontSize={24}
-        fill={labelFill}
-        align="center"
-        verticalAlign="middle"
-        padding={20}
-      />
+      {label ? (
+        <Text
+          x={box.x}
+          y={box.y}
+          width={box.width}
+          height={box.height}
+          text={label}
+          fontFamily="ui-sans-serif, sans-serif"
+          fontSize={24}
+          fill={labelFill}
+          align="center"
+          verticalAlign="middle"
+          padding={20}
+        />
+      ) : null}
     </Group>
+  )
+}
+
+/**
+ * Decoration — a visual divider or accent line, not a labeled box.
+ * Orientation follows the box aspect: tall box → vertical divider,
+ * wide box → horizontal divider. Rendered as a thin rounded bar in a
+ * subtle foreground tint so it reads as a separator, not content.
+ */
+function DecorationShape({ box, palette }: { box: Box; palette: Palette }) {
+  const isVertical = box.height >= box.width
+  const thickness = 4
+  if (isVertical) {
+    const cx = box.x + box.width / 2
+    return (
+      <Rect
+        x={cx - thickness / 2}
+        y={box.y + box.height * 0.1}
+        width={thickness}
+        height={box.height * 0.8}
+        fill={withAlpha(palette.fg, 0.25)}
+        cornerRadius={thickness / 2}
+        listening={false}
+      />
+    )
+  }
+  const cy = box.y + box.height / 2
+  return (
+    <Rect
+      x={box.x + box.width * 0.1}
+      y={cy - thickness / 2}
+      width={box.width * 0.8}
+      height={thickness}
+      fill={withAlpha(palette.fg, 0.25)}
+      cornerRadius={thickness / 2}
+      listening={false}
+    />
   )
 }
 
@@ -1461,9 +1529,32 @@ function fontSizeFor(
   return Math.round(base * hierMul)
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Palette derivation — turn the unified style into renderer-ready colors
-// ─────────────────────────────────────────────────────────────────────────
+/**
+ * Scale a base font size down so the text fits within its box. Without
+ * this, a long headline in a narrow column wraps into an extreme
+ * vertical stack (one or two characters per line). Estimates the
+ * rendered line count via average character width, then shrinks the
+ * font until the wrapped text fits the box height — down to a floor.
+ */
+function fontSizeToFit(text: string, box: Box, baseSize: number): number {
+  if (!text) return baseSize
+  const FLOOR = 18
+  let size = baseSize
+  // Average glyph advance ≈ 0.55 of font size for typical proportional
+  // fonts. Chars-per-line = box width / (size * 0.55).
+  for (let i = 0; i < 12; i++) {
+    const charsPerLine = Math.max(1, Math.floor(box.width / (size * 0.55)))
+    const lines = Math.ceil(text.length / charsPerLine)
+    const neededHeight = lines * size * 1.18
+    if (neededHeight <= box.height || size <= FLOOR) break
+    // Shrink proportionally toward fitting, with a little extra bite so
+    // we converge in a few iterations.
+    size = Math.max(FLOOR, size * Math.sqrt(box.height / neededHeight) * 0.95)
+  }
+  return Math.round(size)
+}
+
+
 
 interface Palette {
   bg: string
@@ -1497,17 +1588,21 @@ function derivePalette(style: CarouselStyle): Palette {
           ? primary
           : primary
 
-  const fg = isDark ? '#FFFFFF' : '#111111'
+  // Determine bg darkness from the ACTUAL background color, not the
+  // mood field. The synthesizer's mood and its primary color can
+  // disagree (e.g. mood='light' but a dark primary), which produced
+  // the dark-text-on-dark-background bug. The rendered color wins.
+  const bgLum = colorLuminance(bg)
+  const bgIsDark = bgLum < 0.5
+
+  // Foreground follows the background: light text on dark bg, dark text
+  // on light bg. Slightly softened from pure white/black for a less
+  // harsh, more designed feel.
+  const fg = bgIsDark ? '#F5F1E8' : '#1A1A1A'
 
   // Accent foreground — choose whichever of white/black contrasts more
   // against the accent. Simple luminance threshold.
   const accentFg = readableTextColor(accent)
-
-  // Compute bg darkness from the actual color, not just the mood,
-  // since 'high-contrast' mood can mean either light-on-dark or
-  // dark-on-light backgrounds.
-  const bgLum = colorLuminance(bg)
-  const bgIsDark = bgLum < 0.5
 
   return {
     bg,

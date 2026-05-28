@@ -145,6 +145,8 @@ interface LayoutElement {
     | 'overlay'
   size: 'small' | 'medium' | 'large' | 'full'
   role: string
+  /** Literal display text bound to this slot by the synthesizer. */
+  content?: string
   notes?: string
 }
 

@@ -446,6 +446,24 @@ export const LayoutElementSchema = z.object({
   size: z.enum(['small', 'medium', 'large', 'full']),
   /** Free-form descriptor of role, e.g. "primary headline", "brand sticker". */
   role: z.string(),
+  /**
+   * The literal text this element should display, derived from the
+   * script content. REQUIRED for text-bearing elements (headline,
+   * body, quote, callout, number, badge) — this is what binds a
+   * specific portion of the script to a specific layout slot. Without
+   * it, the renderer can't tell what to put in each slot and falls
+   * back to repeating the whole slide's text in every slot.
+   *
+   * Examples: a "split" hook slide with two headline elements should
+   * have content "Storytelling" (left) and "Intentional Storytelling"
+   * (right) — NOT the full headline in both. A two-column comparison's
+   * left body gets the left concept's explanation, the right body gets
+   * the right concept's.
+   *
+   * Omit for purely visual elements (image, decoration, logo) that
+   * carry no text.
+   */
+  content: z.string().optional(),
   /** Optional free-form details, e.g. "yellow circular shape", "white text". */
   notes: z.string().optional(),
 })

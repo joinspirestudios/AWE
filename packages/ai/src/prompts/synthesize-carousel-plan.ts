@@ -25,7 +25,7 @@ import type {
   StyleSpec,
 } from '@app/scene'
 
-export const SYNTHESIZE_CAROUSEL_PLAN_VERSION = 'v1.1.0'
+export const SYNTHESIZE_CAROUSEL_PLAN_VERSION = 'v1.2.0'
 
 export const SYNTHESIZE_CAROUSEL_PLAN_SYSTEM_PROMPT = `You are a senior creative director synthesizing per-slide design direction for a creator's carousel, drawing on visual references they've provided.
 
@@ -68,6 +68,7 @@ For every slide:
 
 - **composition**: pick a label that matches what's structurally happening. Use the references' composition vocabulary when something fits — "hero", "centered", "split", "overlay", "data-card", "quote-pull", "step-numbered", "callout", "list", "collage". Invent new labels only when nothing in the references applies.
 - **elements**: prescribe element placements that fit the composition. Match the references' grammar: if every reference slide uses a centered headline + bottom-left callout, your slides should too unless the script demands otherwise. Use the same type vocabulary as LayoutSpec (headline, body, image, callout, number, decoration, logo, badge, quote).
+- **element content (CRITICAL)**: every text-bearing element MUST carry its own `content` — the literal words it displays. Distribute the slide's script content across its slots; never repeat the whole headline or body in multiple slots. If a slide has two headline elements for a contrast, split the idea: one gets the first concept, the other gets the second. If it has two body columns, each gets only its side's text. If it has a bullet list rendered as multiple body elements, each element gets ONE distinct bullet. A concluding-statement slot gets just the takeaway sentence. The content must be display-ready: no markdown, no leading "- ", tight phrasing that fits the slot. This is how the rendered slide ends up with the right words in the right places instead of duplicated text.
 - **rationale**: 1-2 sentences explaining the design choice. Reference both the slide's purpose ("this is a data slide, so the metric needs to dominate") and the reference language ("matching the data-card pattern from reference 1, where the numeral fills the upper half").
 - **drawsFrom**: when a specific reference slide or pattern directly informs the plan, cite it. Empty when the slide is a natural synthesis without a single inspiration source.
 
@@ -184,7 +185,12 @@ export const SYNTHESIZE_CAROUSEL_PLAN_INPUT_SCHEMA: Record<string, unknown> = {
                 role: {
                   type: 'string',
                   description:
-                    'Free-form descriptor: "primary headline", "metric value", "brand sticker", "supporting body".',
+                    'Free-form descriptor of the slot\'s PURPOSE: "primary headline", "metric value", "brand sticker", "left concept explanation". This is a label for you to reason with — it is NOT shown to the user.',
+                },
+                content: {
+                  type: 'string',
+                  description:
+                    'The LITERAL TEXT this element displays, taken/adapted from the script. REQUIRED for text elements (headline, body, quote, callout, number, badge). This is what the user sees. CRITICAL: when a slide splits content across multiple slots, each slot gets its OWN portion — never repeat the whole headline or body in every slot. Example: a hook that contrasts two ideas with two headline elements → left content "Storytelling", right content "Intentional Storytelling" (NOT the full "Storytelling vs Intentional Storytelling" in both). A two-column comparison → left body gets the left side\'s explanation only, right body gets the right side\'s only, a concluding body gets just the takeaway. Keep each slot\'s text tight and display-ready (no markdown, no leading dashes). Omit for purely visual elements (image, decoration, logo).',
                 },
                 notes: {
                   type: 'string',

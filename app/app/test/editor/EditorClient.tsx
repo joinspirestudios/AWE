@@ -25,7 +25,7 @@
 
 import Link from 'next/link'
 import { useEffect, useMemo, useState } from 'react'
-import { Circle, Group, Layer, Rect, Stage, Text } from 'react-konva'
+import { Group, Layer, Rect, Stage, Text } from 'react-konva'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types — mirror the @app/scene shapes but kept local for portability
@@ -151,6 +151,12 @@ export default function EditorClient() {
   const [payload, setPayload] = useState<EditorPayload | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [currentIndex, setCurrentIndex] = useState(0)
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  // fontsReady flips to true once Google Fonts requested for this carousel
+  // have loaded. Used as a render key so Konva re-measures text in the real
+  // typeface instead of the fallback. Without this, the canvas keeps the
+  // fallback measurement and the font swap looks broken.
+  const [fontsReady, setFontsReady] = useState(false)
 
   // Read from localStorage on mount. localStorage isn't available on the
   // server pass; this effect runs only on the client.
@@ -179,6 +185,65 @@ export default function EditorClient() {
       )
     }
   }, [])
+
+  // Font loading. Read the synthesized font guesses from the payload's
+  // style and request them from Google Fonts. If the family isn't on
+  // Google Fonts the link 404s silently and the font-stack fallback
+  // kicks in — no error state needed. When the fonts finish loading,
+  // we flip a render key so Konva re-measures text in the real face
+  // instead of the system fallback it used during the first paint.
+  useEffect(() => {
+    if (!payload) return
+
+    const headlineFamily =
+      payload.plan.style.typography.headlineFontGuesses[0]?.family
+    const bodyFamily = payload.plan.style.typography.bodyFontGuesses[0]?.family
+    const families = [headlineFamily, bodyFamily].filter(
+      (f): f is string => Boolean(f && f.trim()),
+    )
+    if (families.length === 0) {
+      setFontsReady(true)
+      return
+    }
+
+    // Build the Google Fonts URL. Format:
+    //   https://fonts.googleapis.com/css2?family=Name:wght@400;500;700&family=Other:wght@400;700&display=swap
+    // Spaces in family names become '+'. We request a generous weight
+    // range so any weight Konva asks for has something to render with.
+    const params = families
+      .map(
+        (f) =>
+          `family=${encodeURIComponent(f).replace(/%20/g, '+')}:wght@300;400;500;600;700;900`,
+      )
+      .join('&')
+    const href = `https://fonts.googleapis.com/css2?${params}&display=swap`
+
+    const link = document.createElement('link')
+    link.rel = 'stylesheet'
+    link.href = href
+    document.head.appendChild(link)
+
+    // Wait for the fonts to actually be ready. document.fonts.ready
+    // resolves once all currently-pending font loads complete. There's
+    // a small chance the link's @font-face declarations aren't yet
+    // parsed when we check — a microtask delay is enough to be safe.
+    let cancelled = false
+    Promise.resolve()
+      .then(() => document.fonts.ready)
+      .then(() => {
+        if (!cancelled) setFontsReady(true)
+      })
+      .catch(() => {
+        // If fonts.ready rejects for any reason, render anyway with
+        // fallback fonts. Better than blocking forever.
+        if (!cancelled) setFontsReady(true)
+      })
+
+    return () => {
+      cancelled = true
+      if (link.parentNode) link.parentNode.removeChild(link)
+    }
+  }, [payload])
 
   if (loadError) {
     return (
@@ -210,7 +275,7 @@ export default function EditorClient() {
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100">
-      {/* Header */}
+      {/* Header — minimal: back link, carousel identity, details toggle */}
       <header className="flex items-center justify-between border-b border-neutral-900 px-6 py-3">
         <div className="flex items-center gap-4">
           <Link
@@ -220,43 +285,43 @@ export default function EditorClient() {
             ← Funnel
           </Link>
           <div>
-            <h1 className="text-sm font-medium">AWE Editor</h1>
-            <p className="text-[11px] text-neutral-500">
+            <h1 className="text-sm font-medium">
               {payload.script.niche}
               {payload.script.subNiche ? ` · ${payload.script.subNiche}` : ''}
-              {' · '}
-              {payload.plan.slides.length} slides
+            </h1>
+            <p className="text-[11px] text-neutral-500">
+              {payload.plan.slides.length} slides · Slide {currentIndex + 1}
             </p>
           </div>
         </div>
-        <div className="text-[11px] text-neutral-500">
-          Wireframe preview — visual fidelity comes in the next slice
-        </div>
+        <button
+          type="button"
+          onClick={() => setDetailsOpen((o) => !o)}
+          className="rounded border border-neutral-800 px-2.5 py-1 text-[11px] text-neutral-400 transition hover:border-neutral-700 hover:text-neutral-200"
+        >
+          {detailsOpen ? 'Hide details' : 'Details'}
+        </button>
       </header>
 
-      <div className="grid grid-cols-[14rem_1fr_18rem] gap-0">
-        {/* Left rail — slide thumbnails */}
+      <div className="grid grid-cols-[14rem_1fr] gap-0">
+        {/* Left rail — slide list. Stripped of purpose pills and other
+            technical chrome; just slide number + the first line of the
+            content so the user can navigate by what's on each slide. */}
         <aside className="border-r border-neutral-900 px-3 py-4">
-          <div className="mb-3 text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-            Slides
-          </div>
-          <div className="space-y-1.5">
+          <div className="space-y-0.5">
             {payload.plan.slides.map((slide, i) => (
               <button
                 key={slide.slideIndex}
                 type="button"
                 onClick={() => setCurrentIndex(i)}
-                className={`flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left text-xs transition ${
+                className={`flex w-full items-baseline gap-2 rounded px-2 py-1.5 text-left transition ${
                   i === currentIndex
                     ? 'bg-neutral-800 text-neutral-100'
                     : 'text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200'
                 }`}
               >
-                <span className="font-mono text-neutral-500">
-                  #{String(i + 1).padStart(2, '0')}
-                </span>
-                <span className="rounded bg-neutral-900 px-1 py-0.5 text-[9px] uppercase tracking-wide text-neutral-400">
-                  {slide.purpose}
+                <span className="font-mono text-[10px] text-neutral-500">
+                  {String(i + 1).padStart(2, '0')}
                 </span>
                 <span className="flex-1 truncate text-[11px]">
                   {payload.script.slides[i]?.headline ?? slide.composition}
@@ -266,7 +331,7 @@ export default function EditorClient() {
           </div>
         </aside>
 
-        {/* Center — canvas */}
+        {/* Center — canvas. The product. */}
         <section className="flex flex-col items-center justify-start p-8">
           <div
             className="overflow-hidden rounded-md shadow-2xl"
@@ -277,89 +342,126 @@ export default function EditorClient() {
           >
             {currentSlide && currentScriptSlide && (
               <SlideCanvas
+                key={fontsReady ? 'fonts-ready' : 'fonts-loading'}
                 slidePlan={currentSlide}
                 style={payload.plan.style}
                 scriptSlide={currentScriptSlide}
               />
             )}
           </div>
-          <div className="mt-3 text-[11px] text-neutral-500">
-            1080 × 1350 logical · {Math.round(DISPLAY_SCALE * 100)}% display
-          </div>
         </section>
-
-        {/* Right rail — slide metadata */}
-        <aside className="border-l border-neutral-900 px-4 py-4">
-          {currentSlide && (
-            <div className="space-y-4 text-xs">
-              <div>
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-                  Composition
-                </div>
-                <div className="mt-1 text-neutral-200">
-                  {currentSlide.composition}
-                </div>
-              </div>
-              <div>
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-                  Rationale
-                </div>
-                <p className="mt-1 leading-relaxed text-neutral-300">
-                  {currentSlide.rationale}
-                </p>
-              </div>
-              {currentSlide.elements.length > 0 && (
-                <div>
-                  <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-                    Elements ({currentSlide.elements.length})
-                  </div>
-                  <ul className="mt-1.5 space-y-1">
-                    {currentSlide.elements.map((el, i) => (
-                      <li key={i} className="text-[11px] text-neutral-400">
-                        <span className="text-neutral-300">{el.type}</span>
-                        <span className="text-neutral-600">{' · '}</span>
-                        <span>{el.region}</span>
-                        <span className="text-neutral-600">{' · '}</span>
-                        <span className="text-neutral-500">{el.role}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {currentSlide.drawsFrom.length > 0 && (
-                <div>
-                  <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-                    Draws from
-                  </div>
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {currentSlide.drawsFrom.map((d, i) => {
-                      const ref = payload.references.find(
-                        (r) => r.id === d.refId,
-                      )
-                      const label = ref?.ownerUsername
-                        ? `@${ref.ownerUsername}`
-                        : d.refId
-                      return (
-                        <span
-                          key={i}
-                          className="rounded border border-neutral-800 bg-neutral-900 px-1.5 py-0.5 text-[10px] text-neutral-400"
-                          title={d.what}
-                        >
-                          {label}
-                          {typeof d.slideIndex === 'number'
-                            ? ` · ${d.slideIndex + 1}`
-                            : ''}
-                        </span>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </aside>
       </div>
+
+      {/* Details slide-over — only mounted when user requests it. */}
+      {detailsOpen && currentSlide && (
+        <DetailsPanel
+          slide={currentSlide}
+          references={payload.references}
+          onClose={() => setDetailsOpen(false)}
+        />
+      )}
     </main>
+  )
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// DetailsPanel — slide-over surfacing the synthesis metadata
+//
+// Hidden by default. Surfaces composition, rationale, elements, and
+// "draws from" attributions for users who want to know why the AI made
+// the choices it did. Most users will never open this; for those who
+// do, it should feel like a glance into the AI's reasoning.
+// ────────────────────────────────────────────────────────────────────────
+
+function DetailsPanel({
+  slide,
+  references,
+  onClose,
+}: {
+  slide: SlidePlan
+  references: EditorPayload['references']
+  onClose: () => void
+}) {
+  return (
+    <div
+      className="fixed inset-y-0 right-0 z-50 w-80 overflow-y-auto border-l border-neutral-800 bg-neutral-950 px-5 py-4 shadow-2xl"
+      role="dialog"
+    >
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-300">
+          Slide details
+        </h2>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-neutral-500 hover:text-neutral-200"
+          aria-label="Close details"
+        >
+          ×
+        </button>
+      </div>
+      <div className="space-y-4 text-xs">
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+            Composition
+          </div>
+          <div className="mt-1 text-neutral-200">{slide.composition}</div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+            Rationale
+          </div>
+          <p className="mt-1 leading-relaxed text-neutral-300">
+            {slide.rationale}
+          </p>
+        </div>
+        {slide.elements.length > 0 && (
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+              Elements ({slide.elements.length})
+            </div>
+            <ul className="mt-1.5 space-y-1">
+              {slide.elements.map((el, i) => (
+                <li key={i} className="text-[11px] text-neutral-400">
+                  <span className="text-neutral-300">{el.type}</span>
+                  <span className="text-neutral-600">{' · '}</span>
+                  <span>{el.region}</span>
+                  <span className="text-neutral-600">{' · '}</span>
+                  <span className="text-neutral-500">{el.role}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {slide.drawsFrom.length > 0 && (
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+              Draws from
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {slide.drawsFrom.map((d, i) => {
+                const ref = references.find((r) => r.id === d.refId)
+                const label = ref?.ownerUsername
+                  ? `@${ref.ownerUsername}`
+                  : d.refId
+                return (
+                  <span
+                    key={i}
+                    className="rounded border border-neutral-800 bg-neutral-900 px-1.5 py-0.5 text-[10px] text-neutral-400"
+                    title={d.what}
+                  >
+                    {label}
+                    {typeof d.slideIndex === 'number'
+                      ? ` · ${d.slideIndex + 1}`
+                      : ''}
+                  </span>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -380,6 +482,16 @@ function SlideCanvas({
   // reused across elements. mood + background type drive both.
   const palette = useMemo(() => derivePalette(style), [style])
 
+  // Pre-compute every element's box in a single layout pass. This is
+  // layout-aware: elements at middle-left and middle-right are
+  // recognized as a 2-column row and share horizontal space, instead
+  // of each being given 60% of slide width and overlapping in the
+  // middle. Overlay elements get type-specific positioning.
+  const boxes = useMemo(
+    () => computeBoxes(slidePlan.elements),
+    [slidePlan.elements],
+  )
+
   return (
     <Stage
       width={SLIDE_W * DISPLAY_SCALE}
@@ -399,6 +511,7 @@ function SlideCanvas({
           <ElementShape
             key={i}
             element={el}
+            box={boxes[i]}
             style={style}
             palette={palette}
             scriptSlide={scriptSlide}
@@ -423,46 +536,169 @@ function BackgroundLayer({
 }) {
   const bgType = style.background.type
 
-  // Solid: single Rect fill.
+  // Solid: single Rect fill, with subtle vignette overlay for depth.
   if (bgType === 'solid') {
-    return <Rect x={0} y={0} width={SLIDE_W} height={SLIDE_H} fill={palette.bg} />
+    return (
+      <Group>
+        <Rect x={0} y={0} width={SLIDE_W} height={SLIDE_H} fill={palette.bg} />
+        <VignetteOverlay palette={palette} />
+      </Group>
+    )
   }
 
   // Gradient: Konva supports linear gradients via fillLinearGradient* props.
+  // Multi-stop for richer depth than a two-color linear ramp.
   if (bgType === 'gradient') {
     return (
+      <Group>
+        <Rect
+          x={0}
+          y={0}
+          width={SLIDE_W}
+          height={SLIDE_H}
+          fillLinearGradientStartPoint={{ x: 0, y: 0 }}
+          fillLinearGradientEndPoint={{ x: SLIDE_W, y: SLIDE_H }}
+          fillLinearGradientColorStops={[
+            0,
+            palette.bgAccent,
+            0.5,
+            palette.bg,
+            1,
+            palette.bg,
+          ]}
+        />
+        <VignetteOverlay palette={palette} />
+      </Group>
+    )
+  }
+
+  // Texture: solid color base + grain noise overlay. The noise overlay
+  // gives the film-grain feel the references have without needing AI
+  // gen yet (Slice 2 will replace with AI-generated textures for
+  // higher fidelity).
+  if (bgType === 'texture') {
+    return (
+      <Group>
+        <Rect x={0} y={0} width={SLIDE_W} height={SLIDE_H} fill={palette.bg} />
+        <GrainOverlay opacity={0.22} />
+        <VignetteOverlay palette={palette} />
+      </Group>
+    )
+  }
+
+  // Photo / photo-overlay: until Slice 2 wires AI-generated photos,
+  // approximate the mood with a darker tinted gradient + grain. Not a
+  // real photo, but reads as "image background" rather than "wireframe".
+  return (
+    <Group>
       <Rect
         x={0}
         y={0}
         width={SLIDE_W}
         height={SLIDE_H}
         fillLinearGradientStartPoint={{ x: 0, y: 0 }}
-        fillLinearGradientEndPoint={{ x: SLIDE_W, y: SLIDE_H }}
-        fillLinearGradientColorStops={[0, palette.bg, 1, palette.bgAccent]}
+        fillLinearGradientEndPoint={{ x: 0, y: SLIDE_H }}
+        fillLinearGradientColorStops={[
+          0,
+          palette.bgAccent,
+          1,
+          palette.bg,
+        ]}
       />
-    )
-  }
-
-  // Photo / photo-overlay / texture: placeholder treatment. A mood-tinted
-  // base with a label indicating this is a stand-in for real imagery.
-  // Slice 2 will swap this for real photos (upload or AI-gen).
-  return (
-    <Group>
-      <Rect x={0} y={0} width={SLIDE_W} height={SLIDE_H} fill={palette.bg} />
-      {/* Subtle hint that this is a placeholder background */}
-      <Text
-        x={SLIDE_W / 2}
-        y={SLIDE_H - 70}
-        offsetX={300}
-        width={600}
-        align="center"
-        text={`[${bgType} background — placeholder]`}
-        fontSize={20}
-        fontFamily="ui-monospace, monospace"
-        fill={palette.subtle}
-        opacity={0.5}
-      />
+      <GrainOverlay opacity={0.18} />
+      <VignetteOverlay palette={palette} strong />
     </Group>
+  )
+}
+
+/**
+ * Film-grain overlay. Generates a small noise canvas once on mount and
+ * tiles it across the slide via Konva's pattern-fill mechanism. The
+ * canvas is grayscale random noise; we apply with low opacity and a
+ * multiply composite so it darkens the underlying color naturally
+ * rather than washing it out.
+ */
+function GrainOverlay({ opacity = 0.2 }: { opacity?: number }) {
+  const [pattern, setPattern] = useState<HTMLImageElement | null>(null)
+
+  useEffect(() => {
+    // 256×256 is a sweet spot — large enough that the tile isn't
+    // visibly repeating at slide scale; small enough to generate fast.
+    const TILE = 256
+    const canvas = document.createElement('canvas')
+    canvas.width = TILE
+    canvas.height = TILE
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const imgData = ctx.createImageData(TILE, TILE)
+    for (let i = 0; i < imgData.data.length; i += 4) {
+      // Bias the noise slightly dark so the multiply blend mode has
+      // something to multiply with. Pure mid-gray gives almost no
+      // visible grain.
+      const v = 60 + Math.random() * 195
+      imgData.data[i] = v
+      imgData.data[i + 1] = v
+      imgData.data[i + 2] = v
+      imgData.data[i + 3] = 255
+    }
+    ctx.putImageData(imgData, 0, 0)
+    const img = new window.Image()
+    img.src = canvas.toDataURL()
+    img.onload = () => setPattern(img)
+  }, [])
+
+  if (!pattern) return null
+  return (
+    <Rect
+      x={0}
+      y={0}
+      width={SLIDE_W}
+      height={SLIDE_H}
+      fillPatternImage={pattern}
+      fillPatternRepeat="repeat"
+      opacity={opacity}
+      globalCompositeOperation="multiply"
+      listening={false}
+    />
+  )
+}
+
+/**
+ * Subtle vignette — darkens the corners slightly to give the slide a
+ * little depth. References-style carousels typically have a tiny bit
+ * of edge darkening; without it everything looks flat.
+ */
+function VignetteOverlay({
+  palette,
+  strong = false,
+}: {
+  palette: Palette
+  strong?: boolean
+}) {
+  const cx = SLIDE_W / 2
+  const cy = SLIDE_H / 2
+  const innerR = SLIDE_W * 0.4
+  const outerR = SLIDE_W * 0.75
+  const edgeAlpha = strong ? 0.45 : 0.2
+  // Use the bg color, darkened, for the vignette so it complements
+  // rather than tints. For light backgrounds, vignette goes light too
+  // (rare but possible with mood=light).
+  const vignetteColor = palette.bgIsDark
+    ? `rgba(0, 0, 0, ${edgeAlpha})`
+    : `rgba(0, 0, 0, ${edgeAlpha * 0.6})`
+  return (
+    <Rect
+      x={0}
+      y={0}
+      width={SLIDE_W}
+      height={SLIDE_H}
+      fillRadialGradientStartPoint={{ x: cx, y: cy }}
+      fillRadialGradientStartRadius={innerR}
+      fillRadialGradientEndPoint={{ x: cx, y: cy }}
+      fillRadialGradientEndRadius={outerR}
+      fillRadialGradientColorStops={[0, 'rgba(0,0,0,0)', 1, vignetteColor]}
+      listening={false}
+    />
   )
 }
 
@@ -472,18 +708,24 @@ function BackgroundLayer({
 
 function ElementShape({
   element,
+  box,
   style,
   palette,
   scriptSlide,
   slideIndex,
 }: {
   element: LayoutElement
+  box: Box
   style: CarouselStyle
   palette: Palette
   scriptSlide: ScriptSlide
   slideIndex: number
 }) {
-  const box = regionToBox(element.region, element.size, element.type)
+  // Pre-resolve preferred font families once per render. The Google
+  // Fonts CSS link was already injected when the payload loaded.
+  const headlineFamily =
+    style.typography.headlineFontGuesses[0]?.family
+  const bodyFamily = style.typography.bodyFontGuesses[0]?.family
 
   switch (element.type) {
     case 'headline':
@@ -491,11 +733,17 @@ function ElementShape({
         <TextElement
           box={box}
           text={scriptSlide.headline}
-          fontFamily={typographyFontFamily(style.typography.headlineStyle)}
+          fontFamily={typographyFontFamily(
+            style.typography.headlineStyle,
+            headlineFamily,
+          )}
           fontWeight={typographyWeight(style.typography.headlineWeight)}
           fontSize={fontSizeFor('headline', element.size, style.typography.hierarchy)}
           fill={palette.fg}
           align={textAlignFromRegion(element.region, style.layout.alignment)}
+          letterSpacing={
+            style.typography.headlineStyle === 'display' ? -1 : -0.5
+          }
         />
       )
 
@@ -504,7 +752,10 @@ function ElementShape({
         <TextElement
           box={box}
           text={scriptSlide.body ?? ''}
-          fontFamily={typographyFontFamily(style.typography.bodyStyle)}
+          fontFamily={typographyFontFamily(
+            style.typography.bodyStyle,
+            bodyFamily,
+          )}
           fontWeight={400}
           fontSize={fontSizeFor('body', element.size, style.typography.hierarchy)}
           fill={palette.fg}
@@ -517,7 +768,10 @@ function ElementShape({
         <TextElement
           box={box}
           text={scriptSlide.body ?? scriptSlide.headline}
-          fontFamily={typographyFontFamily(style.typography.headlineStyle)}
+          fontFamily={typographyFontFamily(
+            style.typography.headlineStyle,
+            headlineFamily,
+          )}
           fontWeight={typographyWeight(style.typography.headlineWeight)}
           fontSize={fontSizeFor('quote', element.size, style.typography.hierarchy)}
           fill={palette.fg}
@@ -535,11 +789,12 @@ function ElementShape({
         <TextElement
           box={box}
           text={text}
-          fontFamily={typographyFontFamily('display')}
+          fontFamily={typographyFontFamily('display', headlineFamily)}
           fontWeight={900}
           fontSize={fontSizeFor('number', element.size, 'high-contrast')}
           fill={palette.accent}
           align="center"
+          letterSpacing={-2}
         />
       )
     }
@@ -594,6 +849,7 @@ function TextElement({
   fill,
   align,
   fontStyle,
+  letterSpacing,
 }: {
   box: Box
   text: string
@@ -603,6 +859,7 @@ function TextElement({
   fill: string
   align: 'left' | 'center' | 'right'
   fontStyle?: string
+  letterSpacing?: number
 }) {
   // Konva's fontStyle accepts a CSS-ish string like "italic 700" combining
   // style and weight. Combine here so we can drive both via props.
@@ -622,6 +879,7 @@ function TextElement({
       verticalAlign="middle"
       wrap="word"
       lineHeight={1.15}
+      letterSpacing={letterSpacing}
     />
   )
 }
@@ -637,33 +895,34 @@ function CalloutShape({
   fill: string
   textFill: string
 }) {
-  // Pill/oval matching the reference language (e.g. @emily.the.recruiter's
-  // oval callout stickers). For slice 1 we use a Circle for short text,
-  // wider ellipse-via-Rect-with-corner-radius for longer.
-  const isShort = text.length <= 12
-  if (isShort) {
-    const r = Math.min(box.width, box.height) / 2
-    const cx = box.x + box.width / 2
-    const cy = box.y + box.height / 2
-    return (
-      <Group>
-        <Circle x={cx} y={cy} radius={r} fill={fill} />
-        <Text
-          x={cx - r}
-          y={cy - 24}
-          width={r * 2}
-          height={48}
-          text={text}
-          fontFamily="ui-sans-serif, sans-serif"
-          fontStyle="600"
-          fontSize={Math.max(18, r / 4)}
-          fill={textFill}
-          align="center"
-          verticalAlign="middle"
-        />
-      </Group>
-    )
-  }
+  // Oval/pill shape — matches the references' oval-callout-sticker
+  // motif. A Rect with cornerRadius=min(w,h)/2 produces a true pill on
+  // wide boxes and a circle on square boxes, which is more flexible
+  // than a strict Konva Circle node.
+  const cornerR = Math.min(box.width, box.height) / 2
+
+  // Font sizing: scale by the smaller dimension so text fits inside
+  // the oval. Shorter text gets a larger font; longer text gets
+  // smaller, with a floor so it stays legible.
+  const lengthBudget = (box.width * box.height) / Math.max(text.length, 1)
+  const baseFontSize = Math.sqrt(lengthBudget) * 0.65
+  const fontSize = Math.max(22, Math.min(box.height * 0.32, baseFontSize))
+
+  // Inner padding tracks the oval's curvature — text needs to stay
+  // off the rounded edges. About 18% of the smaller dimension is a
+  // reasonable visual margin.
+  const innerPad = Math.min(box.width, box.height) * 0.18
+
+  // Shadow gives the callout dimensionality — it stops looking like a
+  // flat cutout and starts looking like an applied sticker.
+  const shadowBlur = Math.min(40, box.height * 0.25)
+  const shadowOffsetY = Math.min(12, box.height * 0.08)
+
+  // Subtle radial gradient adds a touch of internal lighting variation
+  // so the callout doesn't look like a solid color blob. Inner highlight
+  // is just a hint lighter than the base fill.
+  const highlight = lightenHex(fill, 0.08)
+
   return (
     <Group>
       <Rect
@@ -671,22 +930,38 @@ function CalloutShape({
         y={box.y}
         width={box.width}
         height={box.height}
-        fill={fill}
-        cornerRadius={box.height / 2}
+        fillRadialGradientStartPoint={{
+          x: box.width * 0.4,
+          y: box.height * 0.35,
+        }}
+        fillRadialGradientStartRadius={0}
+        fillRadialGradientEndPoint={{
+          x: box.width * 0.5,
+          y: box.height * 0.5,
+        }}
+        fillRadialGradientEndRadius={Math.max(box.width, box.height) * 0.6}
+        fillRadialGradientColorStops={[0, highlight, 1, fill]}
+        cornerRadius={cornerR}
+        shadowColor="rgba(0, 0, 0, 0.35)"
+        shadowBlur={shadowBlur}
+        shadowOffsetX={0}
+        shadowOffsetY={shadowOffsetY}
+        shadowOpacity={1}
       />
       <Text
-        x={box.x}
+        x={box.x + innerPad}
         y={box.y}
-        width={box.width}
+        width={box.width - innerPad * 2}
         height={box.height}
         text={text}
         fontFamily="ui-sans-serif, sans-serif"
         fontStyle="600"
-        fontSize={Math.max(20, box.height * 0.35)}
+        fontSize={fontSize}
         fill={textFill}
         align="center"
         verticalAlign="middle"
-        padding={16}
+        wrap="word"
+        lineHeight={1.1}
       />
     </Group>
   )
@@ -801,82 +1076,293 @@ function sizeToFraction(size: ElementSize): {
 }
 
 /**
- * Convert a region + size to a positioned Box in slide coordinates.
- * Element type can adjust the box (e.g. callouts and numbers stay
- * square-ish; images can be more rectangular).
+ * Compute the rendered box for every element on the slide in a single
+ * pass. Layout-aware: when multiple elements share a row (vertical
+ * band), they share that row's horizontal space as columns instead of
+ * each taking 60% of slide width and overlapping in the middle.
+ *
+ * Algorithm:
+ *   1. Separate elements into full-bleed, overlay, and in-grid.
+ *   2. Full-bleed → entire slide.
+ *   3. In-grid → group by vertical band (top/middle/bottom). For each
+ *      band, detect which horizontal bands are present (left/center/
+ *      right). The count of present bands = number of columns. Each
+ *      element is sized within its column, not the full slide.
+ *      Multiple elements in the same column-row cell stack vertically.
+ *   4. Overlay → positioned and sized per element type. Callouts go
+ *      to a small accent position; images become full-bleed; etc.
  */
-function regionToBox(
-  region: Region,
-  size: ElementSize,
-  type: ElementType,
-): Box {
-  if (region === 'full-bleed' || region === 'overlay') {
-    return { x: 0, y: 0, width: SLIDE_W, height: SLIDE_H }
+function computeBoxes(elements: LayoutElement[]): Box[] {
+  const boxes: Box[] = new Array(elements.length)
+  const fullBleedIdx: number[] = []
+  const overlayIdx: number[] = []
+  const inGridIdx: number[] = []
+
+  elements.forEach((el, i) => {
+    if (el.region === 'full-bleed') fullBleedIdx.push(i)
+    else if (el.region === 'overlay') overlayIdx.push(i)
+    else inGridIdx.push(i)
+  })
+
+  // 1. Full-bleed: the whole slide.
+  for (const i of fullBleedIdx) {
+    boxes[i] = { x: 0, y: 0, width: SLIDE_W, height: SLIDE_H }
   }
 
-  const frac = sizeToFraction(size)
-  let w = SLIDE_W * frac.w
-  let h = SLIDE_H * frac.h
+  // 2. In-grid: lay out via row-bands → columns.
+  layoutInGrid(elements, inGridIdx, boxes)
 
-  // Callout / number / badge shapes look better at consistent aspect
-  // ratios (circular-ish or pill-shaped) rather than the wide text band
-  // defaults. Clamp height proportional to width.
-  if (type === 'callout' || type === 'number' || type === 'badge') {
-    const target = Math.min(w, h * 2.5)
-    w = target
-    h = type === 'callout' ? target * 0.6 : target * 0.45
-  }
+  // 3. Overlay: positioned per type.
+  layoutOverlays(elements, overlayIdx, boxes)
 
-  // Image/decoration/logo look better square or near-square at small/medium.
-  if (
-    (type === 'image' || type === 'decoration' || type === 'logo') &&
-    size !== 'full'
-  ) {
-    if (size === 'small') h = w
-  }
-
-  // Map region to anchor; compute (x, y) from anchor.
-  const [vBand, hBand] = parseRegion(region)
-  const vAvail = SLIDE_H - 2 * PADDING
-  const hAvail = SLIDE_W - 2 * PADDING
-
-  let x: number
-  switch (hBand) {
-    case 'left':
-      x = PADDING
-      break
-    case 'center':
-      x = PADDING + (hAvail - w) / 2
-      break
-    case 'right':
-      x = SLIDE_W - PADDING - w
-      break
-  }
-
-  let y: number
-  switch (vBand) {
-    case 'top':
-      y = PADDING
-      break
-    case 'middle':
-      y = PADDING + (vAvail - h) / 2
-      break
-    case 'bottom':
-      y = SLIDE_H - PADDING - h
-      break
-  }
-
-  return { x, y, width: w, height: h }
+  return boxes
 }
 
-function parseRegion(
-  r: Region,
-): ['top' | 'middle' | 'bottom', 'left' | 'center' | 'right'] {
-  // Caller guards against full-bleed/overlay; only the 3×3 grid lands here.
-  const [v, h] = r.split('-') as [
-    'top' | 'middle' | 'bottom',
-    'left' | 'center' | 'right',
+/**
+ * Lay out the elements that live in the 3×3 region grid. Splits into
+ * row-bands (top/middle/bottom), determines column count per band from
+ * which horizontal bands are present, then distributes elements within
+ * each column.
+ */
+function layoutInGrid(
+  elements: LayoutElement[],
+  indices: number[],
+  boxes: Box[],
+) {
+  const byRow: Record<VBand, number[]> = { top: [], middle: [], bottom: [] }
+  for (const i of indices) {
+    const [v] = parseRegion(elements[i].region as GridRegion)
+    byRow[v].push(i)
+  }
+
+  // Vertical band layout: split slide into 3 horizontal strips with
+  // some headroom for visual balance. Top/bottom strips get slightly
+  // less than middle so headlines have room to breathe.
+  const ROW_GAP = 40
+  const rowHeights = computeRowHeights(byRow)
+  let cursorY = PADDING
+
+  for (const band of ['top', 'middle', 'bottom'] as const) {
+    const rowIndices = byRow[band]
+    if (rowIndices.length === 0) {
+      cursorY += rowHeights[band] + ROW_GAP
+      continue
+    }
+
+    layoutRow(elements, rowIndices, boxes, cursorY, rowHeights[band])
+    cursorY += rowHeights[band] + ROW_GAP
+  }
+}
+
+/**
+ * Allocate row heights based on which bands have content. Empty bands
+ * collapse so the populated content uses more of the canvas. Middle
+ * gets a small bonus when present (it's typically where the headline
+ * sits and benefits from breathing room).
+ */
+function computeRowHeights(
+  byRow: Record<VBand, number[]>,
+): Record<VBand, number> {
+  const ROW_GAP = 40
+  const totalH = SLIDE_H - 2 * PADDING
+  const populated = (['top', 'middle', 'bottom'] as const).filter(
+    (b) => byRow[b].length > 0,
+  )
+
+  if (populated.length === 0) {
+    return { top: 0, middle: 0, bottom: 0 }
+  }
+
+  const totalGap = ROW_GAP * (populated.length - 1)
+  const availH = totalH - totalGap
+
+  // Weight middle row slightly heavier when present.
+  const weights: Record<VBand, number> = { top: 1, middle: 1.2, bottom: 1 }
+  const presentWeightSum = populated.reduce((sum, b) => sum + weights[b], 0)
+
+  return {
+    top: byRow.top.length > 0 ? (weights.top / presentWeightSum) * availH : 0,
+    middle:
+      byRow.middle.length > 0
+        ? (weights.middle / presentWeightSum) * availH
+        : 0,
+    bottom:
+      byRow.bottom.length > 0
+        ? (weights.bottom / presentWeightSum) * availH
+        : 0,
+  }
+}
+
+/**
+ * Distribute elements across columns within a single row band.
+ * Detects column count from the horizontal bands present among the
+ * row's elements. Stacks elements vertically when multiple share the
+ * same column-row cell.
+ */
+function layoutRow(
+  elements: LayoutElement[],
+  rowIndices: number[],
+  boxes: Box[],
+  rowY: number,
+  rowHeight: number,
+) {
+  // Group by h-band within this row.
+  const byCol: Record<HBand, number[]> = { left: [], center: [], right: [] }
+  for (const i of rowIndices) {
+    const [, h] = parseRegion(elements[i].region as GridRegion)
+    byCol[h].push(i)
+  }
+
+  const activeColumns: HBand[] = (['left', 'center', 'right'] as const).filter(
+    (b) => byCol[b].length > 0,
+  )
+  const colCount = activeColumns.length
+  const COL_GAP = colCount > 1 ? 50 : 0
+  const totalW = SLIDE_W - 2 * PADDING
+  const colWidth = (totalW - COL_GAP * (colCount - 1)) / colCount
+
+  activeColumns.forEach((colBand, colIdx) => {
+    const colIndices = byCol[colBand]
+    const colX = PADDING + colIdx * (colWidth + COL_GAP)
+
+    // Distribute the column's vertical space among elements that
+    // stack within it. Each gets an equal-share slot; large/full-size
+    // elements get a wider slot if there's no contention.
+    const slotH = rowHeight / colIndices.length
+
+    colIndices.forEach((elIdx, stackIdx) => {
+      const el = elements[elIdx]
+      const slotY = rowY + stackIdx * slotH
+      boxes[elIdx] = boxForCell(el, colX, slotY, colWidth, slotH)
+    })
+  })
+}
+
+/**
+ * Compute the actual box for one element within an allocated cell
+ * (column-stack slot). Adjusts the box's shape and centering based on
+ * element type — compact shapes (callout, number, badge) are sized as
+ * pills/circles centered in the cell; text and image elements fill
+ * more of the cell.
+ */
+function boxForCell(
+  el: LayoutElement,
+  cellX: number,
+  cellY: number,
+  cellW: number,
+  cellH: number,
+): Box {
+  const frac = sizeToFraction(el.size)
+
+  if (el.type === 'callout' || el.type === 'number' || el.type === 'badge') {
+    // Compact shapes: stay aspect-bounded and centered in the cell.
+    // Choose width based on size hint but cap at cell width minus
+    // some breathing room.
+    const targetW = Math.min(cellW * 0.85, 320 + frac.w * 200)
+    const aspect = el.type === 'callout' ? 0.6 : el.type === 'badge' ? 0.4 : 1.1
+    const targetH = Math.min(cellH * 0.85, targetW * aspect)
+    return {
+      x: cellX + (cellW - targetW) / 2,
+      y: cellY + (cellH - targetH) / 2,
+      width: targetW,
+      height: targetH,
+    }
+  }
+
+  if (el.type === 'image' || el.type === 'decoration' || el.type === 'logo') {
+    // Visual blocks: respect size hint but cap to the cell.
+    const targetW = cellW * Math.min(1, 0.7 + frac.w * 0.3)
+    const targetH = cellH * Math.min(1, 0.7 + frac.h * 1.5)
+    return {
+      x: cellX + (cellW - targetW) / 2,
+      y: cellY + (cellH - targetH) / 2,
+      width: targetW,
+      height: targetH,
+    }
+  }
+
+  // Text-bearing elements (headline, body, quote): use most of the
+  // cell so wrapping has room.
+  return {
+    x: cellX,
+    y: cellY,
+    width: cellW,
+    height: cellH,
+  }
+}
+
+/**
+ * Position overlay elements based on type. Overlay is semantic — "on
+ * top of the rest" — not "fill the entire slide" (which is what the
+ * old code did, producing the giant-yellow-circle bug).
+ *
+ *   - callout: small accent in a corner; top-right by default, or
+ *     bottom-right if there's already a top-right element.
+ *   - image: full-bleed background (Slice 2 will wire real imagery).
+ *   - decoration: thin band along an edge.
+ *   - other: centered medium pill near the top.
+ */
+function layoutOverlays(
+  elements: LayoutElement[],
+  indices: number[],
+  boxes: Box[],
+) {
+  // Track which corners are already taken so multiple overlay callouts
+  // don't stack on top of each other.
+  const cornerOrder: Array<{ x: number; y: number }> = [
+    { x: SLIDE_W - PADDING - 360, y: PADDING },              // top-right
+    { x: PADDING, y: PADDING },                              // top-left
+    { x: SLIDE_W - PADDING - 360, y: SLIDE_H - PADDING - 200 }, // bottom-right
+    { x: PADDING, y: SLIDE_H - PADDING - 200 },              // bottom-left
   ]
+  let cornerCursor = 0
+
+  for (const i of indices) {
+    const el = elements[i]
+    if (el.type === 'image') {
+      boxes[i] = { x: 0, y: 0, width: SLIDE_W, height: SLIDE_H }
+    } else if (el.type === 'decoration') {
+      // Thin band along bottom
+      boxes[i] = {
+        x: 0,
+        y: SLIDE_H - 100,
+        width: SLIDE_W,
+        height: 80,
+      }
+    } else if (
+      el.type === 'callout' ||
+      el.type === 'badge' ||
+      el.type === 'logo'
+    ) {
+      const c = cornerOrder[cornerCursor % cornerOrder.length]!
+      cornerCursor++
+      // Size based on size hint; callouts pill-shaped, badges smaller
+      const frac = sizeToFraction(el.size)
+      const w = Math.min(360, 200 + frac.w * 200)
+      const aspect = el.type === 'callout' ? 0.55 : 0.4
+      const h = w * aspect
+      boxes[i] = { x: c.x, y: c.y, width: w, height: h }
+    } else {
+      // Headlines/body/quote/number as overlays: centered medium block
+      // near the top. Rare in synthesis output but defensible default.
+      const w = SLIDE_W * 0.7
+      const h = 200
+      boxes[i] = {
+        x: (SLIDE_W - w) / 2,
+        y: PADDING + 40,
+        width: w,
+        height: h,
+      }
+    }
+  }
+}
+
+type VBand = 'top' | 'middle' | 'bottom'
+type HBand = 'left' | 'center' | 'right'
+type GridRegion = Exclude<Region, 'full-bleed' | 'overlay'>
+
+function parseRegion(r: GridRegion): [VBand, HBand] {
+  const [v, h] = r.split('-') as [VBand, HBand]
   return [v, h]
 }
 
@@ -888,31 +1374,40 @@ function textAlignFromRegion(
   if (region === 'full-bleed' || region === 'overlay') {
     return globalAlignment === 'mixed' ? 'center' : globalAlignment
   }
-  const [, h] = parseRegion(region)
+  const [, h] = parseRegion(region as GridRegion)
   return h
 }
 
 /**
- * Resolve a typography category to a CSS font-family stack. Slice 1 uses
- * generic fallbacks; loading the actual family from headlineFontGuesses
- * is its own slice.
+ * Resolve a typography category to a CSS font-family stack. When the
+ * synthesizer named a specific font (via headlineFontGuesses /
+ * bodyFontGuesses), we prefer that family at the front of the stack;
+ * the editor's font-loading effect will have requested it from Google
+ * Fonts. If the named font isn't available, the browser falls through
+ * to the category-appropriate fallback below.
  */
 function typographyFontFamily(
   cat: 'serif' | 'sans' | 'display' | 'monospace',
+  preferredFamily?: string,
 ): string {
-  switch (cat) {
-    case 'serif':
-      return 'ui-serif, Georgia, serif'
-    case 'sans':
-      return 'ui-sans-serif, system-ui, sans-serif'
-    case 'display':
-      // Display fonts are a stand-in until we load real families. Bold
-      // serif gives a reasonable editorial feel that survives the next
-      // upgrade better than condensed-sans would.
-      return '"Playfair Display", "Times New Roman", ui-serif, serif'
-    case 'monospace':
-      return 'ui-monospace, "SF Mono", Menlo, monospace'
+  const fallback = (() => {
+    switch (cat) {
+      case 'serif':
+        return 'ui-serif, Georgia, serif'
+      case 'sans':
+        return 'ui-sans-serif, system-ui, sans-serif'
+      case 'display':
+        // Display fonts often want a high-impact serif/sans. Pick
+        // something editorial as the final fallback.
+        return '"Playfair Display", "Times New Roman", ui-serif, serif'
+      case 'monospace':
+        return 'ui-monospace, "SF Mono", Menlo, monospace'
+    }
+  })()
+  if (preferredFamily && preferredFamily.trim()) {
+    return `"${preferredFamily}", ${fallback}`
   }
+  return fallback
 }
 
 function typographyWeight(
@@ -969,6 +1464,8 @@ interface Palette {
   subtle: string
   placeholder: string
   placeholderLabel: string
+  /** True when the background color is dark (mood='dark' or computed luminance is low). */
+  bgIsDark: boolean
 }
 
 function derivePalette(style: CarouselStyle): Palette {
@@ -996,6 +1493,12 @@ function derivePalette(style: CarouselStyle): Palette {
   // against the accent. Simple luminance threshold.
   const accentFg = readableTextColor(accent)
 
+  // Compute bg darkness from the actual color, not just the mood,
+  // since 'high-contrast' mood can mean either light-on-dark or
+  // dark-on-light backgrounds.
+  const bgLum = colorLuminance(bg)
+  const bgIsDark = bgLum < 0.5
+
   return {
     bg,
     bgAccent: primary2,
@@ -1005,7 +1508,13 @@ function derivePalette(style: CarouselStyle): Palette {
     subtle: withAlpha(fg, 0.12),
     placeholder: withAlpha(accent, 0.15),
     placeholderLabel: withAlpha(fg, 0.5),
+    bgIsDark,
   }
+}
+
+function colorLuminance(hex: string): number {
+  const { r, g, b } = parseHex(hex)
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255
 }
 
 /** White or black, whichever reads better on top of the given hex color. */
@@ -1035,4 +1544,14 @@ function parseHex(hex: string): { r: number; g: number; b: number } {
 function withAlpha(hex: string, a: number): string {
   const { r, g, b } = parseHex(hex)
   return `rgba(${r}, ${g}, ${b}, ${a})`
+}
+
+/** Mix a hex color toward white by fraction (0..1). 0=original, 1=white. */
+function lightenHex(hex: string, fraction: number): string {
+  const { r, g, b } = parseHex(hex)
+  const f = Math.max(0, Math.min(1, fraction))
+  const lr = Math.round(r + (255 - r) * f)
+  const lg = Math.round(g + (255 - g) * f)
+  const lb = Math.round(b + (255 - b) * f)
+  return `rgb(${lr}, ${lg}, ${lb})`
 }

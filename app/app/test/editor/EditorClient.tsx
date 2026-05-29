@@ -747,7 +747,11 @@ function ElementShape({
           fontSize={fontSizeToFit(
             element.content ?? scriptSlide.headline,
             box,
-            fontSizeFor('headline', element.size, style.typography.hierarchy),
+            headlineBaseSize(
+              element.content ?? scriptSlide.headline,
+              element.size,
+              style.typography.hierarchy,
+            ),
           )}
           fill={palette.fg}
           align={textAlignFromRegion(element.region, style.layout.alignment)}
@@ -850,16 +854,24 @@ function ElementShape({
       // the box's aspect) in the accent color.
       return <DecorationShape box={box} palette={palette} />
 
-    case 'image':
     case 'logo':
-      // Until Slice 2 wires real imagery, these stay as subtle
-      // placeholder blocks — but without the loud debug label. A faint
-      // tinted block reads as "image goes here" without shouting.
+      // No real brand asset exists until the creator supplies one.
+      // Rendering a big gray placeholder box here was the loudest
+      // "unfinished" artifact in the output — it landed on every slide.
+      // Until there's an actual logo to draw, render nothing: an empty
+      // gap reads as intentional negative space; a labeled gray box does
+      // not. (Synthesis will also stop stamping a logo on every slide.)
+      return null
+
+    case 'image':
+      // Until Slice 2 wires real imagery, an image slot stays a faint
+      // tinted block so the composition still reserves its space — but
+      // unlabeled, so it whispers "image goes here" instead of shouting.
       return (
         <PlaceholderRect
           box={box}
-          label={element.type === 'logo' ? 'logo' : ''}
-          fill={element.type === 'logo' ? palette.subtle : palette.placeholder}
+          label=""
+          fill={palette.placeholder}
           labelFill={palette.placeholderLabel}
         />
       )
@@ -1527,6 +1539,32 @@ function fontSizeFor(
   if (type === 'body')
     return Math.round(base / (hierarchy === 'high-contrast' ? 1.1 : 1))
   return Math.round(base * hierMul)
+}
+
+/**
+ * Headlines should be short — a phrase, not a sentence. Synthesis
+ * sometimes types a full explanatory sentence as a `headline`, which
+ * then renders at full headline scale and turns the slide into a wall
+ * of shouting type (the comparison-slide failure mode). This demotes
+ * the *base* size by word count before fit-to-box runs: a genuine short
+ * headline keeps its punch; a sentence-length "headline" drops toward
+ * body scale so hierarchy survives even when the upstream element type
+ * is wrong. Renderer-side safety net for an upstream typing problem —
+ * the real fix is in the synthesis prompt, this just stops the bleed.
+ */
+function headlineBaseSize(
+  text: string,
+  size: ElementSize,
+  hierarchy: 'high-contrast' | 'subtle',
+): number {
+  const base = fontSizeFor('headline', size, hierarchy)
+  const words = text.trim().split(/\s+/).filter(Boolean).length
+  if (words <= 6) return base // genuine short headline — full impact
+  if (words <= 12) return Math.round(base * 0.6) // long headline — tame it
+  // A sentence typed as a headline: pull down to ~body scale (a touch
+  // above, so it still leads) instead of dominating the slide.
+  const bodyLead = Math.round(fontSizeFor('body', size, hierarchy) * 1.25)
+  return Math.min(Math.round(base * 0.45), bodyLead)
 }
 
 /**

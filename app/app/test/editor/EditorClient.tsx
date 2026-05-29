@@ -471,6 +471,27 @@ function DetailsPanel({
 // SlideCanvas — the Konva render
 // ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * How much of the canvas the content should occupy, derived from the
+ * reference's extracted layout. This is what lets the renderer OBEY the
+ * reference's composition density instead of imposing one: an airy,
+ * loose reference gets generous negative space; a tight or full-bleed
+ * reference fills the frame.
+ */
+function fillFactorFromLayout(layout: CarouselStyle['layout']): number {
+  if (layout.fullBleed) return 0.96
+  switch (layout.grid) {
+    case 'tight':
+      return 0.9
+    case 'asymmetric':
+      return 0.75
+    case 'loose':
+      return 0.58
+    default:
+      return 0.8
+  }
+}
+
 function SlideCanvas({
   slidePlan,
   style,
@@ -490,9 +511,14 @@ function SlideCanvas({
   // of each being given 60% of slide width and overlapping in the
   // middle. Overlay elements get type-specific positioning.
   const boxes = useMemo(
-    () => computeBoxes(slidePlan.elements),
-    [slidePlan.elements],
+    () => computeBoxes(slidePlan.elements, fillFactorFromLayout(style.layout)),
+    [slidePlan.elements, style.layout],
   )
+
+  // Creator handle for the footer. No data source carries it yet, so it
+  // renders as just the arrow accent for now; wire this to the brand
+  // kit / script input (e.g. "@thebami_") to print the handle too.
+  const brandHandle: string | undefined = undefined
 
   return (
     <Stage
@@ -524,8 +550,49 @@ function SlideCanvas({
             />
           )
         })}
+
+        {/* Footer chrome — every reference slide carries a small, fixed
+            brand footer (a handle bottom-left, a thin arrow accent
+            bottom-right). It lives in the negative space the compact
+            layout now leaves below the content. */}
+        <FooterChrome palette={palette} handle={brandHandle} />
       </Layer>
     </Stage>
+  )
+}
+
+/**
+ * Small persistent footer matching the reference carousels: a thin
+ * horizontal arrow accent at bottom-right, and the creator handle at
+ * bottom-left when one is available. Deliberately quiet — it should
+ * never compete with the slide content.
+ */
+function FooterChrome({
+  palette,
+  handle,
+}: {
+  palette: Palette
+  handle?: string
+}) {
+  // De-biased: the persistent bottom-right arrow was a specific motif
+  // from one reference, not a universal. Footer chrome now appears ONLY
+  // when the creator actually has a handle, and renders just that — no
+  // imposed decoration. A reference-driven footer treatment (if the
+  // uploaded reference exhibits one) should come from the plan instead.
+  if (!handle) return null
+  const y = SLIDE_H - 70
+  return (
+    <Group listening={false}>
+      <Text
+        x={PADDING}
+        y={y - 6}
+        text={handle}
+        fontFamily="ui-sans-serif, system-ui, sans-serif"
+        fontSize={26}
+        fontStyle="500"
+        fill={withAlpha(palette.fg, 0.55)}
+      />
+    </Group>
   )
 }
 
@@ -733,6 +800,50 @@ function ElementShape({
     style.typography.headlineFontGuesses[0]?.family
   const bodyFamily = style.typography.bodyFontGuesses[0]?.family
 
+  // Container short-circuit: any text-bearing element tagged with a
+  // container renders as a ContentBlock (band/box + bold label + body)
+  // at uniform size, regardless of its nominal type. This is how the
+  // reference grammar is expressed; it overrides the float-text default
+  // that produced free-floating, oversized text.
+  if (
+    element.container &&
+    (element.type === 'headline' ||
+      element.type === 'body' ||
+      element.type === 'quote' ||
+      element.type === 'callout')
+  ) {
+    const blockText = element.content ?? scriptSlide.headline
+    const family =
+      element.type === 'headline'
+        ? typographyFontFamily(style.typography.headlineStyle, headlineFamily)
+        : typographyFontFamily(style.typography.bodyStyle, bodyFamily)
+    const PAD = 28
+    // Uniform, body-scale type — emphasis is weight + container, not size.
+    const base = fontSizeFor('body', element.size, style.typography.hierarchy)
+    const inner: Box = {
+      x: box.x + PAD,
+      y: box.y + PAD,
+      width: box.width - PAD * 2,
+      // Leave room for the bold label line when present, so the body
+      // copy is fitted to the space it actually gets.
+      height: box.height - PAD * 2 - (element.label ? base * 1.35 : 0),
+    }
+    const fitted = fontSizeToFit(blockText, inner, base)
+    return (
+      <ContentBlock
+        box={box}
+        label={element.label}
+        content={blockText}
+        fontFamily={family}
+        fontSize={fitted}
+        container={element.container}
+        tone={element.tone ?? 'neutral'}
+        palette={palette}
+        align={textAlignFromRegion(element.region, style.layout.alignment)}
+      />
+    )
+  }
+
   switch (element.type) {
     case 'headline':
       return (
@@ -926,6 +1037,102 @@ function TextElement({
       lineHeight={1.15}
       letterSpacing={letterSpacing}
     />
+  )
+}
+
+/**
+ * ContentBlock — the reference carousels' core unit: a short bold
+ * label + regular-weight body, rendered INSIDE a container (a filled
+ * color band or a thin-bordered box) at a single uniform text size.
+ * Emphasis comes from weight + container color, never from blowing the
+ * type up. This is the primitive the renderer was missing — without it
+ * the only way to differentiate text was size, which is exactly the
+ * failure mode (giant shouting headlines).
+ */
+function ContentBlock({
+  box,
+  label,
+  content,
+  fontFamily,
+  fontSize,
+  container,
+  tone,
+  palette,
+  align,
+}: {
+  box: Box
+  label?: string
+  content: string
+  fontFamily: string
+  fontSize: number
+  container: 'band' | 'box'
+  tone: 'accent' | 'dark' | 'neutral'
+  palette: Palette
+  align: 'left' | 'center' | 'right'
+}) {
+  const PAD = 28
+  const isBand = container === 'band'
+  // Band fill by tone; box has no fill, just a border.
+  const fillColor = isBand
+    ? tone === 'dark'
+      ? palette.fg
+      : tone === 'neutral'
+        ? palette.subtle
+        : palette.accent
+    : undefined
+  // Text reverses to read against the fill: light text on accent/dark
+  // bands, ink text on neutral bands and on (paper-backed) boxes.
+  const textColor = isBand
+    ? tone === 'dark'
+      ? palette.bg
+      : tone === 'neutral'
+        ? palette.fg
+        : palette.accentFg
+    : palette.fg
+  const innerW = box.width - PAD * 2
+  const labelGap = label ? fontSize * 1.35 : 0
+  return (
+    <Group listening={false}>
+      <Rect
+        x={box.x}
+        y={box.y}
+        width={box.width}
+        height={box.height}
+        fill={fillColor}
+        stroke={isBand ? undefined : palette.fg}
+        strokeWidth={isBand ? 0 : 3}
+        cornerRadius={2}
+      />
+      {label ? (
+        <Text
+          x={box.x + PAD}
+          y={box.y + PAD}
+          width={innerW}
+          text={label}
+          fontFamily={fontFamily}
+          fontSize={fontSize}
+          fontStyle="700"
+          fill={textColor}
+          align={align}
+          lineHeight={1.15}
+        />
+      ) : null}
+      <Text
+        x={box.x + PAD}
+        y={box.y + PAD + labelGap}
+        width={innerW}
+        height={box.height - PAD * 2 - labelGap}
+        text={content}
+        fontFamily={fontFamily}
+        fontSize={fontSize}
+        fontStyle="400"
+        fill={textColor}
+        align={align}
+        verticalAlign={label ? 'top' : 'middle'}
+        wrap="word"
+        lineHeight={1.2}
+      />
+    </Group>
   )
 }
 
@@ -1176,7 +1383,7 @@ function sizeToFraction(size: ElementSize): {
  *   4. Overlay → positioned and sized per element type. Callouts go
  *      to a small accent position; images become full-bleed; etc.
  */
-function computeBoxes(elements: LayoutElement[]): Box[] {
+function computeBoxes(elements: LayoutElement[], fillFactor: number): Box[] {
   const boxes: Box[] = new Array(elements.length)
   const fullBleedIdx: number[] = []
   const overlayIdx: number[] = []
@@ -1194,7 +1401,7 @@ function computeBoxes(elements: LayoutElement[]): Box[] {
   }
 
   // 2. In-grid: lay out via row-bands → columns.
-  layoutInGrid(elements, inGridIdx, boxes)
+  layoutInGrid(elements, inGridIdx, boxes, fillFactor)
 
   // 3. Overlay: positioned per type.
   layoutOverlays(elements, overlayIdx, boxes)
@@ -1212,6 +1419,7 @@ function layoutInGrid(
   elements: LayoutElement[],
   indices: number[],
   boxes: Box[],
+  fillFactor: number,
 ) {
   const byRow: Record<VBand, number[]> = { top: [], middle: [], bottom: [] }
   for (const i of indices) {
@@ -1225,7 +1433,7 @@ function layoutInGrid(
   // some headroom for visual balance. Top/bottom strips get slightly
   // less than middle so headlines have room to breathe.
   const ROW_GAP = 40
-  const rowHeights = computeRowHeights(byRow)
+  const rowHeights = computeRowHeights(byRow, fillFactor)
   let cursorY = PADDING
 
   for (const band of ['top', 'middle', 'bottom'] as const) {
@@ -1248,9 +1456,16 @@ function layoutInGrid(
  */
 function computeRowHeights(
   byRow: Record<VBand, number[]>,
+  fillFactor: number,
 ): Record<VBand, number> {
   const ROW_GAP = 40
-  const totalH = SLIDE_H - 2 * PADDING
+  // How much of the canvas the content occupies is DERIVED FROM THE
+  // REFERENCE, not imposed. A loose/airy reference leaves more negative
+  // space (low fillFactor); a tight or full-bleed reference fills the
+  // canvas (high fillFactor). The caller computes fillFactor from the
+  // extracted style.layout (grid + fullBleed), so the renderer obeys
+  // whatever was uploaded rather than forcing one composition density.
+  const totalH = (SLIDE_H - 2 * PADDING) * fillFactor
   const populated = (['top', 'middle', 'bottom'] as const).filter(
     (b) => byRow[b].length > 0,
   )
@@ -1292,11 +1507,20 @@ function layoutRow(
   rowY: number,
   rowHeight: number,
 ) {
-  // Group by h-band within this row.
+  // Group by h-band within this row. Decorations and logos are NOT
+  // content columns — counting them as columns is what pushed a
+  // 'middle-center' body off to the left (and drew an orphan divider as
+  // if it were a text column). Set them aside and place them after, so
+  // they never displace real content.
   const byCol: Record<HBand, number[]> = { left: [], center: [], right: [] }
+  const aside: number[] = []
   for (const i of rowIndices) {
     const el = elements[i]
     if (!el) continue
+    if (el.type === 'decoration' || el.type === 'logo') {
+      aside.push(i)
+      continue
+    }
     const [, h] = parseRegion(el.region as GridRegion)
     byCol[h].push(i)
   }
@@ -1305,26 +1529,45 @@ function layoutRow(
     (b) => byCol[b].length > 0,
   )
   const colCount = activeColumns.length
-  const COL_GAP = colCount > 1 ? 50 : 0
   const totalW = SLIDE_W - 2 * PADDING
-  const colWidth = (totalW - COL_GAP * (colCount - 1)) / colCount
 
-  activeColumns.forEach((colBand, colIdx) => {
-    const colIndices = byCol[colBand]
-    const colX = PADDING + colIdx * (colWidth + COL_GAP)
-
-    // Distribute the column's vertical space among elements that
-    // stack within it. Each gets an equal-share slot; large/full-size
-    // elements get a wider slot if there's no contention.
-    const slotH = rowHeight / colIndices.length
-
-    colIndices.forEach((elIdx, stackIdx) => {
-      const el = elements[elIdx]
-      if (!el) return
-      const slotY = rowY + stackIdx * slotH
-      boxes[elIdx] = boxForCell(el, colX, slotY, colWidth, slotH)
+  if (colCount > 0) {
+    const COL_GAP = colCount > 1 ? 50 : 0
+    const colWidth = (totalW - COL_GAP * (colCount - 1)) / colCount
+    // Anchor each column to its TRUE horizontal third so 'center' is
+    // actually centered and 'right' is actually right — rather than
+    // packing present columns left-to-right.
+    const anchorFor = (band: HBand, idx: number): number => {
+      if (colCount === 1) {
+        if (band === 'center') return (SLIDE_W - colWidth) / 2
+        if (band === 'right') return SLIDE_W - PADDING - colWidth
+        return PADDING
+      }
+      return PADDING + idx * (colWidth + COL_GAP)
+    }
+    activeColumns.forEach((colBand, colIdx) => {
+      const colIndices = byCol[colBand]
+      const colX = anchorFor(colBand, colIdx)
+      const slotH = rowHeight / colIndices.length
+      colIndices.forEach((elIdx, stackIdx) => {
+        const el = elements[elIdx]
+        if (!el) return
+        const slotY = rowY + stackIdx * slotH
+        boxes[elIdx] = boxForCell(el, colX, slotY, colWidth, slotH)
+      })
     })
-  })
+  }
+
+  // Decorations/logos: thin, full-width, parked at the band's base so
+  // they read as a divider accent, never as a content column.
+  for (const i of aside) {
+    boxes[i] = {
+      x: PADDING,
+      y: rowY + rowHeight - 30,
+      width: totalW,
+      height: 24,
+    }
+  }
 }
 
 /**
@@ -1487,9 +1730,14 @@ function typographyFontFamily(
       case 'sans':
         return 'ui-sans-serif, system-ui, sans-serif'
       case 'display':
-        // Display fonts often want a high-impact serif/sans. Pick
-        // something editorial as the final fallback.
-        return '"Playfair Display", "Times New Roman", ui-serif, serif'
+        // 'display' is a high-impact category that can be serif OR sans
+        // depending entirely on the reference — so the renderer must NOT
+        // assume one. The extracted family (preferredFamily, below) is
+        // authoritative and should almost always be present for display
+        // type. This stack is only a neutral last resort when extraction
+        // returned no family: a plain system default, deliberately
+        // unbranded so it imposes no single creator's look.
+        return 'system-ui, "Helvetica Neue", Arial, sans-serif'
       case 'monospace':
         return 'ui-monospace, "SF Mono", Menlo, monospace'
     }

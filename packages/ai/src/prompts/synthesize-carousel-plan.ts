@@ -76,15 +76,41 @@ For every slide:
 
 The script's purpose tells you what each slide needs to *do*. Composition should serve that purpose:
 
-- **hook** — high contrast, minimal copy, maximum stopping power. Often a single bold headline. Reference's most attention-grabbing composition.
-- **point** — balanced headline + body. The workhorse slide. Most reference slides will be this.
+- **hook** — high contrast, minimal copy, maximum stopping power. Keep the headline short and emphasize ONE token the way the references emphasize it (a highlighted word, a size jump, a color swatch — whatever they actually do). Don't blow a full sentence up to headline size unless the references do exactly that.
+- **point** — the workhorse slide. The idea, composed the way the references compose their body slides.
 - **data** — the metric is the focal point. Large numeral, supporting text small. Often centered or upper-half-dominant.
 - **quote** — pulled quotation centerpiece, attribution small. Often with quote marks as decoration.
-- **comparison** — split treatment. Two columns, before/after, vs framing. The composition signals duality.
-- **step** — numbered, sequenced. Step number is itself an element.
-- **cta** — button-like emphasis on the action. Often centered with arrow decoration. Last slide pattern.
+- **comparison** — signal the duality the way the references do it: side-by-side columns, stacked color-coded blocks, before/after — mirror their method. The one thing to avoid is rendering two full sentences as two giant side-by-side headlines (a common failure) unless the references genuinely do that.
+- **step** — numbered, sequenced. The step number is itself an element.
+- **cta** — emphasis on the action, composed the way the references close their carousels.
 
-## When references conflict
+## Output toolbox (how text becomes design)
+
+You have a set of tools for turning text into design. **Use the ones the references actually exhibit — do not impose any of them by default.** If the references float large headlines on open space, do that; if they seat text in colored blocks, do that. Read the references' motifs, layout, and per-slide structure and mirror their method.
+
+1. **container** ('band' = filled rectangle, text reverses on the fill; 'box' = thin border, transparent inside): use ONLY when the references seat concept text inside filled bands or bordered boxes. Many business/editorial carousels do; many photo-led or big-type carousels do NOT. This is a tool, not a requirement.
+
+2. **label + content**: when a block leads with a bold concept name and continues in regular weight, put the bold part in 'label' (1–3 words) and the remainder in 'content'. The renderer renders the label heavier at the SAME size. Use only when the references show this lead-in pattern.
+
+3. **tone** ('accent' | 'dark' | 'neutral'): colors a container from the palette. If the references color-code two recurring ideas, assign consistent tones across slides so the set feels authored.
+
+4. **emphasis method — match the references.** Emphasis may come from WEIGHT + COLOR at a uniform size, OR from SIZE, OR from a highlighted swatch. Do not force one. The only hard rule: do not render long body sentences at headline size when the references keep body text small.
+
+5. **size** should reflect the references' hierarchy — reserve the largest type for whatever they make largest (often a numeral or a 1–4 word hook).
+
+## Composition discipline (applies to every aesthetic)
+
+- **Variety**: don't emit the same composition on more than ~2 consecutive slides unless the references are deliberately uniform ('slidePattern' = 'consistent').
+- **Content split**: every text element carries its own 'content' (the literal words), split across slots — never duplicate the whole headline/body into multiple slots.
+- **Density is handled downstream**: the renderer derives how much of the canvas to fill from the extracted 'layout' (tight/loose/asymmetric, fullBleed). You don't force compactness or fullness in the plan — set 'layout' to match the references and the renderer obeys it.
+- **Footer / logo / decoration**: only add these elements when the references actually show them; never as filler on every slide.
+
+## StyleSpec rules (obey the references, impose nothing)
+
+- **background**: 'colors.primary[0]' IS the rendered background color — order primary so the references' dominant *background* tone is first, whether that is light or dark. Set 'background.mood' to match what the slides actually read as. Never lighten a dark reference or darken a light one.
+- **typography**: set 'headlineStyle' / 'bodyStyle' to the category the references actually use — serif, sans, display, or monospace. If a specific family recurs in the references' font guesses, surface it in 'headlineFontGuesses' / 'bodyFontGuesses' (that family is authoritative for the renderer). Do not default to any particular family or category.
+- **accents**: carry the references' actual highlight colors into 'colors.accents'; they drive containers and callouts.
+
 
 If the references have different design languages (e.g., one is editorial, one is meme-style), don't try to blend them into mush. Pick the language that fits the script's tone best, and lean into that one. You can borrow specific patterns from the other reference where they apply (e.g., a callout treatment from ref 2 used on a slide whose composition is otherwise from ref 1).
 
@@ -191,6 +217,23 @@ export const SYNTHESIZE_CAROUSEL_PLAN_INPUT_SCHEMA: Record<string, unknown> = {
                   type: 'string',
                   description:
                     'The LITERAL TEXT this element displays, taken/adapted from the script. REQUIRED for text elements (headline, body, quote, callout, number, badge). This is what the user sees. CRITICAL: when a slide splits content across multiple slots, each slot gets its OWN portion — never repeat the whole headline or body in every slot. Example: a hook that contrasts two ideas with two headline elements → left content "Storytelling", right content "Intentional Storytelling" (NOT the full "Storytelling vs Intentional Storytelling" in both). A two-column comparison → left body gets the left side\'s explanation only, right body gets the right side\'s only, a concluding body gets just the takeaway. Keep each slot\'s text tight and display-ready (no markdown, no leading dashes). Omit for purely visual elements (image, decoration, logo).',
+                },
+                container: {
+                  type: 'string',
+                  enum: ['band', 'box'],
+                  description:
+                    "Container treatment for concept text — the reference grammar. 'band' = solid filled rectangle (text reverses to read on the fill); 'box' = thin-bordered, transparent inside. Set this on body/concept elements by DEFAULT; omit only for cover/CTA free-floating text. Without a container the slide looks unfinished.",
+                },
+                label: {
+                  type: 'string',
+                  description:
+                    'Bold lead-in rendered before content at the SAME size but heavier weight — this is how emphasis works (weight, not size). Put the concept name here (1–3 words), e.g. "Storytelling"; put the remainder in content, e.g. "starts with the event.". Do not restate the label inside content.',
+                },
+                tone: {
+                  type: 'string',
+                  enum: ['accent', 'dark', 'neutral'],
+                  description:
+                    "Color intent for a container. 'accent' = brand accent fill (e.g. gold); 'dark' = near-black fill, light text; 'neutral' = subtle/plain border. Color-code two recurring concepts consistently across slides (e.g. accent='before', dark='after').",
                 },
                 notes: {
                   type: 'string',

@@ -59,18 +59,20 @@ Font identification rules:
 ### background
 
 - type — solid, gradient, photo, photo-overlay (photo with a color/dark layer on top), or texture.
-- mood — dark (slides read dark), light (slides read light), or high-contrast (slides alternate or split dramatically).
+- mood — dark (slides read dark), light (slides read light), or high-contrast (slides alternate or split dramatically). Judge by the ACTUAL dominant ground tone, not the text on top: a near-black ground is 'dark'; a cream/white/paper ground is 'light' even if its type is near-black. Report what is there — do not assume an aesthetic.
 
 ### motifs
 
-Free-form descriptors that capture distinctive elements. Each motif is 2–5 words. Examples:
-- 'grainy film texture'
-- 'split-panel composition'
-- 'oversized numerals'
-- 'circular crops'
-- 'hand-drawn arrows'
-- 'newsprint typography'
-- 'subtle drop shadows'
+Free-form descriptors that capture distinctive elements. Each motif is 2–5 words. Two things are easy to miss but matter a lot downstream, so look for them explicitly (and only report them when actually present):
+- **How concept text is contained** — does each statement float in open space, or sit inside a filled band / bordered box / pill / card? e.g. 'color-band concept blocks', 'bordered concept boxes', 'text floats on open space'.
+- **How emphasis is created** — by large type? by bold weight at uniform size? by an accent-colored keyword? a highlight swatch? e.g. 'oversized headline emphasis', 'bold-label uniform size', 'highlighted keyword swatch'.
+
+Other example motifs (span the full range — don't bias toward any one look):
+- 'grainy film texture' / 'clean flat color'
+- 'full-bleed photography' / 'paper ground'
+- 'oversized numerals' / 'tiny captions'
+- 'hand-drawn arrows' / 'geometric dividers'
+- 'heavy grotesque sans' / 'elegant serif' / 'mono captions'
 
 Return up to 6 motifs. Skip generic descriptors that apply to most carousels.
 

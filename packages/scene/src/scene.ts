@@ -464,6 +464,35 @@ export const LayoutElementSchema = z.object({
    * carry no text.
    */
   content: z.string().optional(),
+  /**
+   * Optional container treatment. The reference carousels almost never
+   * float text in open space — each concept sits inside a *container*:
+   * a filled color band or a thin-bordered box. This is the single most
+   * important structural primitive the renderer was missing.
+   *   - 'band': a solid filled rectangle behind the text (text reverses
+   *     to read on the fill).
+   *   - 'box': a thin-bordered rectangle, transparent inside (text stays
+   *     in the foreground ink color).
+   * Omit for free-floating text (covers/CTAs sometimes want this).
+   */
+  container: z.enum(['band', 'box']).optional(),
+  /**
+   * Optional bold lead-in rendered BEFORE `content`, at the SAME size
+   * but heavier weight. This is how the references create emphasis —
+   * "**Storytelling** starts with the event." The label is the bold
+   * concept name; content is the regular-weight remainder. Emphasis is
+   * WEIGHT, never size. Keep labels to 1–3 words.
+   */
+  label: z.string().optional(),
+  /**
+   * Color intent for a container. Drives which palette color fills a
+   * band / tints a box, so a carousel can color-code two recurring
+   * concepts consistently (e.g. accent = "before", dark = "after").
+   *   - 'accent': brand accent fill (e.g. gold).
+   *   - 'dark': near-black fill with light text.
+   *   - 'neutral': subtle paper-tone / plain border.
+   */
+  tone: z.enum(['accent', 'dark', 'neutral']).optional(),
   /** Optional free-form details, e.g. "yellow circular shape", "white text". */
   notes: z.string().optional(),
 })

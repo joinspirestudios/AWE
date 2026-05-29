@@ -64,6 +64,13 @@ interface LayoutElement {
   role: string
   /** Literal display text bound to this slot by the synthesizer. */
   content?: string
+  /** Container treatment (mirrors @app/scene LayoutElement): a filled
+   *  band or a thin-bordered box. Omit for free-floating text. */
+  container?: 'band' | 'box'
+  /** Bold lead-in rendered before content at the same size, heavier weight. */
+  label?: string
+  /** Color intent for a container fill/border. */
+  tone?: 'accent' | 'dark' | 'neutral'
   notes?: string
 }
 
